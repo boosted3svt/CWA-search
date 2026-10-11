@@ -1,6 +1,6 @@
 # Calibre OPDS search and download
 
-A Python 3.10+ CLI for searching multiple configured ebook libraries, filtering title/author metadata, selecting a book, and safely downloading its advertised acquisition link. It defaults to MOBI, then EPUB, AZW3, AZW, PDF. Use libraries you are authorized to access.
+A Python 3.8+ CLI for searching multiple configured ebook libraries, filtering title/author metadata, selecting a book, and safely downloading its advertised acquisition link. It defaults to MOBI, then EPUB, AZW3, AZW, PDF. Use libraries you are authorized to access.
 
 The modules are reusable by a future GUI. Results include thumbnail/cover URLs; this milestone does not display images or implement a GUI, Docker, a database, scheduling, or CWA integration.
 
@@ -17,6 +17,8 @@ cp libraries.example.txt libraries.txt
 ```
 
 For runtime only, install `requirements.txt` instead. No service is needed. The tests use mocked HTTP responses and a temporary local HTTP fixture server, never the example remote library.
+
+Python 3.8 is supported, including Ubuntu's 3.8.10 interpreter. The test dependency is pinned to pytest 8.3.5 because pytest 8.4 requires Python 3.9+. If pip reports no matching pytest version after an update, run `git pull` (or download the current ZIP) and retry the installation. Check the virtual environment's interpreter with `.venv/bin/python --version`; upgrading pip does not change that interpreter. The dependency installation and all 38 tests were verified on Python 3.8.20 and 3.12.14.
 
 Edit `libraries.txt` to list one server per line. Blank lines and lines beginning with `#` are ignored. Addresses and library identifiers are not hardcoded:
 

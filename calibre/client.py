@@ -1,4 +1,6 @@
 """Bounded, sequential HTTP requests with origin checks on every redirect."""
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 import time
 from urllib.parse import quote, urlencode, urljoin, urlsplit
