@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 from datetime import datetime, timezone
 from .models import Book
 
@@ -59,11 +60,21 @@ class History:
 
 
 @contextmanager
-def state_lock(path):
+def state_lock(path, cancelled=None):
     lock = Path(str(path) + '.lock')
     lock.parent.mkdir(parents=True, exist_ok=True)
     with lock.open('a') as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        if cancelled is None:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        else:
+            while True:
+                if cancelled():
+                    raise RuntimeError('State lock wait cancelled')
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    time.sleep(0.1)
         yield
         fcntl.flock(handle, fcntl.LOCK_UN)
 
@@ -71,8 +82,42 @@ def state_lock(path):
 def prune_library(path, line):
     """Remove only the timed-out entry; preserve comments and create a backup."""
     path = Path(path)
-    original = path.read_text()
-    backup = path.with_name(path.name + '.bak')
-    atomic_text(backup, original)
-    atomic_text(path, ''.join(item for item in original.splitlines(keepends=True)
-                             if item.strip() != line.strip()))
+    with state_lock(path):
+        original = path.read_text()
+        backup = path.with_name(path.name + '.bak')
+        atomic_text(backup, original)
+        atomic_text(path, ''.join(item for item in original.splitlines(keepends=True)
+                                 if item.strip() != line.strip()))
+
+
+def deduplicate_libraries(settings):
+    """Keep first endpoint/explicit-library selection, comments, and invalid lines."""
+    from urllib.parse import urlsplit
+    from .client import origin, ClientError
+    path = Path(settings.libraries_file)
+    if not path.exists():
+        return 0
+    with state_lock(path):
+        original = path.read_text()
+        kept, seen, removed = [], set(), 0
+        for line in original.splitlines(keepends=True):
+            if not line.strip() or line.lstrip().startswith('#'):
+                kept.append(line)
+                continue
+            try:
+                library = settings.library(line)
+                _, hostname, port = origin(library.url)
+                key = (hostname, port, urlsplit(library.url).path.rstrip('/'),
+                       library.library_id if library.explicit_id else '')
+            except (ClientError, ValueError):
+                kept.append(line)
+                continue
+            if key in seen:
+                removed += 1
+            else:
+                seen.add(key)
+                kept.append(line)
+        if removed:
+            atomic_text(path.with_name(path.name + '.dedup.bak'), original)
+            atomic_text(path, ''.join(kept))
+        return removed

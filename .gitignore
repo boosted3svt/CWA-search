@@ -6,6 +6,8 @@ state/
 config.json
 libraries.txt
 libraries.txt.bak
+libraries.txt.dedup.bak
+libraries.txt.lock
 *.part
 .env
 compose.override.yaml

@@ -55,6 +55,7 @@ def website(tmp_path, xml, mobi, monkeypatch):
         with serving(make_server(service, port=0)) as url:
             yield url, service, tmp_path
         service.executor.shutdown(wait=True)
+        service.catalogs.close()
 
 
 def post(url, endpoint, data):
@@ -291,9 +292,13 @@ def test_refresh_api_publishes_full_catalog_while_local_search_remains_available
     library = Settings.load(service.config).libraries()[0][1]
     entered,release = threading.Event(),threading.Event()
     def scan(*args,**kwargs):
+        from calibre.poll_worker import checkpoint_for
         entered.set(); assert release.wait(5)
-        return [replace(book,source=library.url,library_id='Actual')]
-    monkeypatch.setattr('calibre.cache.full_catalog',scan)
+        from calibre.cache import library_key
+        checkpoint=checkpoint_for(args[0],args[1],library_key(library))
+        checkpoint.save({'url':None,'seen':[],'acquisition_feed':True,'page_count':1,
+                         'complete':True,'resolved_library_id':'Actual'},[replace(book,source=library.url,library_id='Actual')])
+    monkeypatch.setattr(service.catalogs,'run_worker',scan)
     response = post(url,'/api/catalogs/refresh',{})
     assert response.status_code == 202
     try:
@@ -306,3 +311,34 @@ def test_refresh_api_publishes_full_catalog_while_local_search_remains_available
     assert requests.get(url+'/api/catalogs',timeout=5).json()['libraries'][0]['book_count'] == 1
     assert search(url)['cached_at']
     service.catalogs.close()
+
+
+def test_cover_only_api_requires_enabled_covers_and_exposes_progress(website,monkeypatch,book):
+    from dataclasses import replace
+    from calibre.cache import CatalogStore,now
+    from config import Settings
+    url,service,directory=website
+    config=json.loads(service.config.read_text());config['catalog_cache_enabled']=True
+    service.config.write_text(json.dumps(config))
+    assert post(url,'/api/catalogs/covers',{}).status_code==400
+    config['catalog_cache_covers']=True;service.config.write_text(json.dumps(config))
+    entered,release=threading.Event(),threading.Event()
+    settings=Settings.load(service.config);library=settings.libraries()[0][1]
+    CatalogStore(settings.catalog_cache_dir).publish(library,[replace(book,source=library.url)],now())
+    def worker(settings,library,covers_only):
+        assert covers_only
+        with service.catalogs.lock:
+            service.catalogs.active={'source':library.url,'phase':'covers','count':1,'total':2,
+                                     'started_monotonic':time.monotonic(),'last_activity':now(),
+                                     'deadline_seconds':3600}
+        entered.set();assert release.wait(5)
+    monkeypatch.setattr(service.catalogs,'run_worker',worker)
+    assert post(url,'/api/catalogs/covers',{}).status_code==202
+    try:
+        assert entered.wait(2)
+        state=requests.get(url+'/api/catalogs').json()
+        assert state['active']['phase']=='covers' and state['active']['total']==2
+        assert post(url,'/api/catalogs/covers',{}).status_code==409
+    finally:
+        release.set();service.catalogs.worker.join(3)
+    assert requests.get(url+'/api/catalogs').json()['libraries'][0]['book_count']==1

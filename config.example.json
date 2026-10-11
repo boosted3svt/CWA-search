@@ -28,5 +28,7 @@
   "catalog_max_pages": 10000,
   "catalog_max_books": 500000,
   "catalog_request_delay": 0.25,
-  "catalog_cache_covers": false
+  "catalog_cache_covers": false,
+  "catalog_library_timeout_seconds": 3600,
+  "catalog_checkpoint_max_age_hours": 72
 }

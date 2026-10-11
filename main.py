@@ -10,7 +10,7 @@ from calibre.client import Client, ClientError, LibraryTimeout
 from calibre.downloader import download, SUPPORTED_FORMATS
 from calibre.matcher import matches
 from calibre.parser import FeedError
-from calibre.state import History, prune_library, state_lock
+from calibre.state import History, prune_library, state_lock, deduplicate_libraries
 
 
 def make_client(settings, library):
@@ -160,6 +160,9 @@ def cli():
     args = parser.parse_args()
     try:
         settings = Settings.load(args.config)
+        removed = deduplicate_libraries(settings)
+        if removed:
+            print(f'Removed {removed} duplicate library entries (backup: libraries.txt.dedup.bak)', file=sys.stderr)
         with state_lock(settings.history_file):
             history = History(settings.history_file)
             if args.command == 'search':

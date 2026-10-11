@@ -9,19 +9,28 @@ class ScanCancelled(ClientError):
 
 
 def full_catalog(client, max_pages=10000, max_books=500000, pause=lambda: None,
-                 cancelled=lambda: False, progress=lambda count: None):
+                 cancelled=lambda: False, progress=lambda count: None, checkpoint=None):
     # Discovery establishes the selected library; explicit per-line IDs win.
-    client.discover_search()
-    url = urljoin(client.library.url.rstrip('/') + '/', client.opds_path)
-    if client.resolved_library_id:
-        url += ('&' if '?' in url else '?') + urlencode({'library_id': client.resolved_library_id})
-    seen = set()
-    books = {}
-    acquisition_feed = False
-    for _ in range(max_pages):
+    state, books = checkpoint.load() if checkpoint else (None, {})
+    if state:
+        client.resolved_library_id = state['resolved_library_id']
+        progress(len(books))
+        if state['complete']:
+            return list(books.values())
+        url, seen = state['url'], set(state['seen'])
+        acquisition_feed, page_count = state['acquisition_feed'], state['page_count']
+    else:
+        client.discover_search()
+        url = urljoin(client.library.url.rstrip('/') + '/', client.opds_path)
+        if client.resolved_library_id:
+            url += ('&' if '?' in url else '?') + urlencode({'library_id': client.resolved_library_id})
+        seen, acquisition_feed, page_count = set(), False, 0
+    for _ in range(page_count, max_pages):
         if cancelled():
             raise ScanCancelled('Catalog refresh stopped; previous snapshot retained')
         if url in seen:
+            if checkpoint:
+                checkpoint.clear()
             raise ClientError('Catalog pagination/navigation loop detected')
         seen.add(url)
         pause()
@@ -45,6 +54,11 @@ def full_catalog(client, max_pages=10000, max_books=500000, pause=lambda: None,
             if len(navigation) != 1:
                 raise ClientError('No unambiguous full catalog advertised (expected By Title / All Books)')
             url = navigation[0]
+            page_count += 1
+            if checkpoint:
+                checkpoint.save({'url': url, 'seen': sorted(seen), 'acquisition_feed': False,
+                                 'page_count': page_count, 'complete': False,
+                                 'resolved_library_id': client.resolved_library_id}, [])
             continue
         acquisition_feed = True
         if entries and not is_books:
@@ -58,6 +72,11 @@ def full_catalog(client, max_pages=10000, max_books=500000, pause=lambda: None,
         if len(books) > max_books:
             raise ClientError('Catalog exceeds configured book limit; previous snapshot retained')
         progress(len(books))
+        page_count += 1
+        if checkpoint:
+            checkpoint.save({'url': next_url, 'seen': sorted(seen), 'acquisition_feed': True,
+                             'page_count': page_count, 'complete': not next_url,
+                             'resolved_library_id': client.resolved_library_id}, page)
         if not next_url:
             if cancelled():
                 raise ScanCancelled('Catalog refresh stopped; previous snapshot retained')

@@ -64,7 +64,7 @@ def test_manual_stop_pauses_scheduler_but_manual_refresh_resumes(tmp_path, monke
     manager = CatalogManager(config)
     manager.cancel()
     assert not manager.refresh()
-    monkeypatch.setattr(manager, 'run', lambda force: None)
+    monkeypatch.setattr(manager, 'run', lambda *args: None)
     assert manager.refresh(force=True)
     manager.worker.join(3)
     assert manager.paused_until == 0
@@ -94,11 +94,8 @@ def test_failed_refresh_retains_old_snapshot_and_records_error(tmp_path, book, m
     store = CatalogStore(tmp_path / 'state/catalogs')
     library = Library(book.source)
     old = store.publish(library, [book], now())
-    class Fake:
-        def close(self): pass
-    monkeypatch.setattr('calibre.cache.Client', lambda *a, **k: Fake())
     def broken(*a, **k): raise ClientError('Page 2 failed')
-    monkeypatch.setattr('calibre.cache.full_catalog', broken)
+    monkeypatch.setattr(CatalogManager, 'run_worker', broken)
     manager = CatalogManager(config)
     assert manager.refresh(force=True)
     manager.worker.join(3)
@@ -162,16 +159,18 @@ def test_stale_state_flags_age_and_failure():
 
 def test_cache_covers_is_local_and_bounded(tmp_path,book,monkeypatch):
     from test_web import PNG
+    from config import Settings
+    from calibre.poll_worker import run_library
     config=tmp_path/'config.json'
     config.write_text('{"catalog_cache_enabled":true,"catalog_cache_covers":true,"catalog_request_delay":0}')
     (tmp_path/'libraries.txt').write_text(book.source+'\n')
     class Fake:
         def close(self): pass
-    monkeypatch.setattr('calibre.cache.Client',lambda *a,**k:Fake())
-    monkeypatch.setattr('calibre.cache.full_catalog',lambda *a,**k:[book])
-    monkeypatch.setattr('calibre.cache.fetch_image',lambda *a:(PNG,'image/png'))
-    manager=CatalogManager(config)
-    manager.refresh(force=True);manager.worker.join(3)
+    monkeypatch.setattr('calibre.poll_worker.Client',lambda *a,**k:Fake())
+    monkeypatch.setattr('calibre.poll_worker.full_catalog',lambda *a,**k:[book])
+    monkeypatch.setattr('calibre.poll_worker.fetch_image',lambda *a:(PNG,'image/png'))
+    events=[]
+    run_library(Settings.load(config),Library(book.source),library_key(Library(book.source)),
+                report=lambda message,**fields:events.append((message,fields)))
     assert (tmp_path/'state/catalogs/covers'/ (book.key+'.img')).read_bytes()==PNG
-    assert CatalogStore(tmp_path/'state/catalogs').read(Library(book.source))[0]==[book]
-    manager.close()
+    assert any(fields.get('fetched')==1 for _,fields in events)

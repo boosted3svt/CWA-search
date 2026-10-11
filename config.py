@@ -1,6 +1,7 @@
 """JSON settings and line-delimited library URLs; no credentials stored on disk."""
 from dataclasses import dataclass
 import json
+import math
 import os
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit, parse_qs
@@ -33,6 +34,8 @@ class Settings:
     catalog_max_books: int = 500000
     catalog_request_delay: float = 0.25
     catalog_cache_covers: bool = False
+    catalog_library_timeout_seconds: float = 3600
+    catalog_checkpoint_max_age_hours: float = 72
 
     @classmethod
     def load(cls, filename):
@@ -54,6 +57,9 @@ class Settings:
             raise ValueError('Catalog interval must be positive and request delay cannot be negative')
         if min(settings.catalog_max_pages, settings.catalog_max_books) < 1:
             raise ValueError('Catalog limits must be positive')
+        if any(not math.isfinite(value) or value <= 0 for value in
+               (settings.catalog_library_timeout_seconds, settings.catalog_checkpoint_max_age_hours)):
+            raise ValueError('Catalog deadline and checkpoint lifetime must be finite and positive')
         if not isinstance(settings.catalog_cache_enabled, bool) or not isinstance(settings.catalog_cache_covers, bool):
             raise ValueError('Catalog enable/cover flags must be JSON true or false')
         return settings

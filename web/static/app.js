@@ -5,7 +5,7 @@ let currentJob = null;
 let lastSearch = null;
 let failedSelection = null;
 function notice(message, error = false) { $('notice').textContent = message; $('notice').className = error ? 'error' : ''; }
-function setBusy(value) { busy = value; document.querySelectorAll('button').forEach(button => { if (!['refresh-catalogs','stop-catalogs'].includes(button.id)) button.disabled = value; }); }
+function setBusy(value) { busy = value; document.querySelectorAll('button').forEach(button => { if (!['refresh-catalogs','refresh-covers','stop-catalogs'].includes(button.id)) button.disabled = value; }); }
 async function api(path, data) {
   const response = await fetch(path, data === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json','X-OPDS-UI':'1'},body:JSON.stringify(data)});
   const value = await response.json();
@@ -137,12 +137,16 @@ async function loadCatalogs() {
     const count = state.libraries.reduce((total, library) => total + library.book_count, 0);
     $('catalog-summary').textContent = `${state.running ? 'Refresh running. ' : ''}${count.toLocaleString()} cached books across ${cached}/${state.libraries.length} libraries. Refresh interval: ${state.interval_hours} hours. Searches use local metadata; downloads connect to the source server.`;
     $('refresh-catalogs').disabled = state.running;
+    $('refresh-covers').disabled = state.running || !state.covers_enabled;
     $('stop-catalogs').hidden = !state.running;
+    const active = state.active;
+    const phaseNames = {starting:'Connecting',metadata:'Reading books','metadata-complete':'Books read',covers:'Fetching covers','covers-complete':'Covers checked',complete:'Saving results',saving:'Saving catalog',error:'Refresh failed'};
+    $('catalog-progress').textContent = active ? `${active.source} · ${phaseNames[active.phase] || active.phase} · ${active.count || 0}${active.total !== undefined ? '/'+active.total : ''} · ${Math.round(active.elapsed_seconds)}s elapsed / ${active.deadline_seconds}s limit · Last progress: ${new Date(active.last_activity).toLocaleTimeString()}` : '';
     $('catalog-events').textContent = state.events.join('\n');
     $('catalog-libraries').replaceChildren();
     for (const library of state.libraries) {
       const date = library.last_success ? new Date(library.last_success).toLocaleString() : 'not yet cached';
-      $('catalog-libraries').append(node('p', `${library.source} · ${library.book_count.toLocaleString()} books · ${date}${library.error ? ' · Refresh failed: '+library.error : (library.stale && library.cached ? ' · Older cached data' : '')}`, 'source'));
+      $('catalog-libraries').append(node('p', `${library.source} · ${library.book_count.toLocaleString()} books · ${date}${library.error ? ' · Refresh failed: '+library.error : (library.stale && library.cached ? ' · Older cached data' : '')}${library.covers_error ? ' · Cover refresh failed: '+library.covers_error : ''}`, 'source'));
     }
   } catch (error) { /* Foreground actions report connection failures separately. */ }
 }
@@ -152,6 +156,10 @@ $('refresh-catalogs').addEventListener('click', async () => {
 });
 $('stop-catalogs').addEventListener('click', async () => {
   try { await api('/api/catalogs/stop', {}); await loadCatalogs(); }
+  catch (error) { notice(error.message, true); }
+});
+$('refresh-covers').addEventListener('click', async () => {
+  try { await api('/api/catalogs/covers', {}); await loadCatalogs(); }
   catch (error) { notice(error.message, true); }
 });
 loadCatalogs(); setInterval(loadCatalogs, 5000);

@@ -110,6 +110,9 @@ def make_server(service, host='127.0.0.1', port=8090, password=None, allowed_hos
                 elif path == '/api/catalogs/refresh':
                     started = service.catalogs.refresh(force=True)
                     self.reply(202 if started else 409, {'started': started, 'error': 'Refresh already running'} if not started else {'started': True})
+                elif path == '/api/catalogs/covers':
+                    started = service.catalogs.refresh(force=True, covers_only=True)
+                    self.reply(202 if started else 409, {'started': started} if started else {'error': 'Refresh already running'})
                 elif path == '/api/catalogs/stop':
                     service.catalogs.cancel()
                     self.reply(200, {'message': 'Stopping catalog refresh'})
