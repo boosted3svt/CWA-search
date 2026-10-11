@@ -1,8 +1,8 @@
 # Calibre OPDS search and download
 
-A Python 3.8+ CLI for searching multiple configured ebook libraries, filtering title/author metadata, selecting a book, and safely downloading its advertised acquisition link. It defaults to MOBI, then EPUB, AZW3, AZW, PDF. Use libraries you are authorized to access.
+A Python 3.8+ CLI and LAN browser interface for searching multiple configured ebook libraries, filtering title/author metadata, selecting a book, and safely downloading its advertised acquisition link. It defaults to MOBI, then EPUB, AZW3, AZW, PDF. Use libraries you are authorized to access.
 
-The modules are reusable by a future GUI. Results include thumbnail/cover URLs; this milestone does not display images or implement a GUI, Docker, a database, scheduling, or CWA integration.
+The browser interface displays cover thumbnails and uses the same search, validation, and JSON history as the CLI. No Docker, database, scheduling, or CWA-specific integration is required.
 
 ## Ubuntu setup
 
@@ -40,6 +40,29 @@ Before searching, the client reads each server's `/opds` catalog and uses its ad
 An explicit `?library_id=ID` in a library-list URL takes precedence and scopes discovery to that library. The shared `library_id` setting is a fallback, not a value forced onto every discovered server. If a catalog advertises multiple libraries without a single default search, specify the desired ID in that server's line instead of guessing. If `/opds` returns 404 or has no supported search template, the client reports the fallback and uses `search_path` with the configured default ID. Authentication errors and invalid XML remain errors. Set `auto_discover` to false to use the configured search template directly, or set `opds_path` for a different discovery endpoint.
 
 Each attempted server is reported on stderr, followed by its detected library ID and catalog/eligible result counts. A 404 remains an HTTP error, rather than an assumed empty result; searching continues to the next server. JSON result output remains on stdout.
+
+## Web interface on your local network
+
+Update and install from your existing project folder. Keep your current `config.json` and `libraries.txt`; do not overwrite them with the example files:
+
+```bash
+git pull --ff-only
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -q
+.venv/bin/python web_app.py --host 0.0.0.0 --port 8090
+```
+
+Leave that terminal running. On the server, use `hostname -I` to find its LAN address. On another device connected to the same LAN, open `http://SERVER_LAN_IP:8090` in a browser (for example, `http://192.168.1.25:8090`). Use the machine's address, not `0.0.0.0`, in the browser. If a firewall is enabled, allow TCP port 8090 from your LAN subnet. The default without `--host` accepts connections only from the same machine.
+
+Enter an author, title, or both, then click **Search libraries**. Progress shows each server and its discovered ID. The default stops at the first server with eligible results; **Search all libraries** searches the entire list. Cover thumbnails, author metadata, and descriptions help you select a book. Choose a format and click **Download to server**. This explicitly starts the acquisition and saves it on the Ubuntu server, not on your phone or browser device. No ebook is automatically downloaded during search.
+
+**Download folder** saves an absolute server-side path in your existing `config.json`, preserving the other settings. Use a folder writable by the account running the application; it can be your local library's ingest folder. A browser cannot select a folder on another device's filesystem. **Reject this format** marks the selected acquisition bad. **Include previous attempts** enables deliberate retries, including ones recorded as failed. Existing ebook files are never overwritten.
+
+Only one search, download, or rejection operation runs at a time across all browser clients. The UI stays responsive and polls for progress while requests run in the background. Another device (or a refreshed page) can follow an active operation. **Stop search** stops after the current library completes, retaining results already found; it does not interrupt a file download. The CLI uses the same history lock, so running a CLI command during a browser operation may wait. Thumbnails use at most two simultaneous requests, with origin checks and a 2 MB limit. Missing/unavailable covers show a placeholder. No database or new runtime dependency is needed.
+
+Keep this service on a trusted LAN rather than exposing port 8090 to the Internet. By default, everyone able to reach the service can search, trigger downloads, reject formats, and change the server download folder. Optional shared access protection uses the `CALIBRE_WEB_PASSWORD` environment variable; supply it securely before starting the service, then log in at the browser prompt with username `calibre`. HTTP Basic authentication over HTTP is unencrypted; use a properly configured HTTPS deployment for untrusted networks. No CORS access is enabled, and browser mutations require same-origin UI requests. LAN IP addresses, localhost, and the machine hostname are accepted; for a custom LAN DNS name, add `--allowed-host books.lan` to the startup command.
+
+Press Ctrl+C to stop the service. It waits for a running background operation to finish; stop long searches in the UI first. The terminal command is the initial deployment workflow; automatic startup and Docker are not included. Jobs/progress are held in memory and disappear when the server restarts; configuration, history, downloads, and timeout-removal backups remain on disk. Repeat the startup command after a restart.
 
 ## Search, select, and download
 
@@ -141,5 +164,8 @@ Feeds use entity-safe XML parsing and a 5 MB response limit. Pagination has page
 - `calibre/downloader.py`: streaming, validation, safe publication.
 - `calibre/state.py`: JSON history, locks, library-list removal.
 - `config.py`, `main.py`: settings and CLI.
+- `web_app.py`, `web/service.py`, `web/static/`: LAN HTTP interface, background operations, and browser UI.
 
 Run `.venv/bin/python -m pytest -q`. Tests cover parsing, matching, encoding, pagination/limits, unsafe XML, auth/redirect boundaries, HTTP errors/retries/timeouts, download validation/cleanup/overwrite prevention, history/failover, timeout-only pruning, library discovery/explicit overrides, and local CLI flows including a first-server 404 followed by discovery and download from a second server with a different ID. Remote integration is deliberate and optional, not part of the suite.
+
+Web tests cover real HTTP search/cover/download flows against a local fixture library, saved folders, multi-client busy handling, optional authentication, cross-origin rejection, timeout removal, and stopping searches. `tests/test_browser.py` is optional and skipped by default; it was executed with Chromium and Playwright on Python 3.12 to validate form submission, thumbnail display, format selection, a server download, and a mobile viewport. The standard Python 3.8 suite does not require Playwright.

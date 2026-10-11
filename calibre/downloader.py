@@ -58,7 +58,7 @@ def validate(path, fmt):
         raise DownloadError(f'Content validation is unsupported for format {fmt}')
 
 
-def download(client, book, acquisition, destination, max_bytes=100_000_000):
+def download(client, book, acquisition, destination, max_bytes=100_000_000, on_warning=None):
     if acquisition not in book.acquisitions:
         raise DownloadError('Acquisition is not associated with the selected book')
     if acquisition.format not in SUPPORTED_FORMATS:
@@ -98,8 +98,10 @@ def download(client, book, acquisition, destination, max_bytes=100_000_000):
                 raise DownloadError(message + '; download size differs from the OPDS acquisition length')
             # Calibre can update EPUB metadata during delivery. The catalog length
             # may describe the stored file, not the complete delivered ZIP.
-            logging.getLogger(__name__).warning(
-                '%s. EPUB ZIP integrity and container checks passed; keeping the file.', message)
+            warning = message + '. EPUB ZIP integrity and container checks passed; keeping the file.'
+            logging.getLogger(__name__).warning(warning)
+            if on_warning:
+                on_warning(warning)
         # Hard-link publication is atomic and fails if another process created target.
         try:
             os.link(temporary, target)

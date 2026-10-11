@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Calibre Library Search</title><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
+<body>
+<header><div class="brand">CWA <span>LIBRARY SEARCH</span></div><span id="library-count">Loading libraries…</span></header>
+<main>
+<div class="intro"><p class="eyebrow">YOUR NEXT READ</p><h1>Find a book across your libraries.</h1><p>Search, check the cover, and choose a format to save on your server.</p></div>
+<section class="panel">
+<form id="search-form">
+<div class="fields"><label>Author<input id="author" name="author" placeholder="e.g. Kate Battistelli" maxlength="250"></label><label>Book title<input id="title" name="title" placeholder="e.g. The God Dare" maxlength="250"></label></div>
+<div class="options"><label><input type="checkbox" id="exact"> Exact matches</label><label><input type="checkbox" id="all-libraries"> Search all libraries</label><label><input type="checkbox" id="include-history"> Include previous attempts</label><label><input type="checkbox" id="keep-timeouts"> Keep timed-out libraries</label></div>
+<button type="submit" class="primary" id="search-button">Search libraries</button><span id="search-hint">Stops at the first library with eligible matches.</span>
+</form></section>
+<div id="notice" role="status" aria-live="polite"></div>
+<section id="activity-panel" class="panel" hidden><h2>Activity</h2><button id="stop-button" type="button" hidden>Stop search</button><pre id="activity" aria-live="off"></pre></section>
+<section aria-label="Search results"><div class="result-heading"><h2 id="result-heading">Results will appear here</h2></div><div id="results" class="results"></div></section>
+<section class="panel settings"><h2>Download folder</h2><p>Files are saved on the machine running this application, rather than on the device using this page.</p><form id="settings-form"><label>Server folder<input id="download-dir" required></label><button type="submit">Save folder</button></form><p id="timeout-note"></p></section>
+</main><footer>Calibre OPDS search · Your libraries, one place to look.</footer>
+</body></html>

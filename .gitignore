@@ -5,4 +5,5 @@ downloads/
 state/
 config.json
 libraries.txt
+libraries.txt.bak
 *.part
