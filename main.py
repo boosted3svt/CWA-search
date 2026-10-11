@@ -73,6 +73,17 @@ def search(args, settings, history):
             if getattr(client, 'discovery_message', ''):
                 print(f'  {client.discovery_message}', file=sys.stderr)
             print(f'  {len(books)} catalog results; {len(selected)} eligible matches', file=sys.stderr)
+            if books and not selected:
+                for book in books[:5]:
+                    if not matches(book, args.title, args.author, args.exact):
+                        reason = 'title/author metadata did not match'
+                    elif not any(a.format in SUPPORTED_FORMATS for a in book.acquisitions):
+                        reason = 'no supported ebook format'
+                    else:
+                        reason = 'supported acquisitions excluded by download history; --include-history permits retries'
+                    title = ' '.join(book.title.split())[:160]
+                    authors = ' '.join(', '.join(book.authors).split())[:160] or '(missing author)'
+                    print(f'  Excluded: {title} | {authors} | {reason}', file=sys.stderr)
             if client.truncated:
                 print(f'Configured page/result limit reached at {library.url}', file=sys.stderr)
             if selected and not args.all_libraries:

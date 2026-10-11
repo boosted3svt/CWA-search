@@ -119,3 +119,28 @@ def test_unsupported_match_continues_next_library(monkeypatch, tmp_path, book):
                      all_libraries=False, keep_timeouts=False, json=True, select=False)
     assert search(args, Settings(libraries_file=str(path)), History(tmp_path / 'history.json')) == 0
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize('excluded_by_history', [False, True])
+def test_exclusion_output_explains_filter(monkeypatch, tmp_path, book, capsys, excluded_by_history):
+    from dataclasses import replace
+    path = tmp_path / 'libraries.txt'
+    path.write_text('books.test:80\n')
+    candidate = replace(book, source='http://books.test:80', library_id='',
+                        authors=['Battistelli, Kate'] if excluded_by_history else ['Another Author'])
+    history = History(tmp_path / 'history.json')
+    if excluded_by_history:
+        for acquisition in candidate.acquisitions:
+            history.record(candidate, acquisition, 'bad')
+    class Fake:
+        truncated = False
+        def search(self, term): return [candidate]
+        def close(self): pass
+    monkeypatch.setattr('main.make_client', lambda *args: Fake())
+    args = Namespace(author='Kate Battistelli', title=None, exact=False, include_history=False,
+                     all_libraries=False, keep_timeouts=False, json=True, select=False)
+    assert search(args, Settings(libraries_file=str(path)), history) == 0
+    output = capsys.readouterr()
+    assert 'Excluded:' in output.err
+    assert ('download history' if excluded_by_history else 'metadata did not match') in output.err
+    assert json.loads(output.out)['results'] == []

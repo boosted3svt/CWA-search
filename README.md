@@ -76,6 +76,8 @@ For noninteractive use:
 
 Search is sequential, with bounded retries and backoff. It stops at the first library with eligible matches. It never downloads automatically. Use `--all-libraries` to search every configured library. `--exact` requires normalized full title/author equality; the default uses contiguous, word-boundary partial matching, with case, punctuation, and whitespace normalization. When both title and author are supplied, both must match.
 
+Author matching also recognizes explicit surname-first metadata: `Battistelli, Kate` matches a search for `Kate Battistelli`, including with `--exact`. The search text sent to the server is unchanged; this normalization is applied only when filtering returned author metadata. Title matching does not reorder words. If a server returns books but none are eligible, stderr shows up to five excluded titles/authors and whether they failed metadata matching, lacked supported formats, or were excluded by download history.
+
 ## Remember bad or failed downloads
 
 Searches, book metadata, and per-acquisition outcomes are stored in a JSON file, without a database. Failed, rejected, and successfully downloaded acquisitions are skipped by default. Another format of the same book remains eligible; when all its acquisitions have been tried, searching proceeds to the next eligible book/library.

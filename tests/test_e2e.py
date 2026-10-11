@@ -80,8 +80,12 @@ def test_cli_discovers_different_id_after_first_server_404(tmp_path, xml, mobi, 
             calls.append(('second', self.path))
             if self.path == '/opds':
                 body = b'<feed xmlns="http://www.w3.org/2005/Atom"><link rel="search" href="/opds/search/{searchTerms}?library_id=Second_Library"/></feed>'
-            elif self.path == '/opds/search/Kate%20Battistelli?library_id=Second_Library':
+            elif self.path in ('/opds/search/Kate%20Battistelli?library_id=Second_Library',
+                               '/opds/search/Kate%20Battistelli%20The%20God%20Dare?library_id=Second_Library'):
                 body = (xml.replace(b'Emily Rath', b'Kate Battistelli')
+                        .replace(b'<name>Kate Battistelli</name>', b'<name>Battistelli, Kate</name>')
+                        .replace(b'Pucking Around: A Why Choose Hockey Romance',
+                                 b'The God Dare: Will You Choose to Believe the Impossible?')
                         .replace(b'Calibre_Library', b'Second_Library')
                         .replace(b' <link rel="next" href="/opds/search/emily%20rath?library_id=Second_Library&amp;offset=30"/>', b''))
             elif self.path == '/get/mobi/3170/Second_Library':
@@ -107,10 +111,11 @@ def test_cli_discovers_different_id_after_first_server_404(tmp_path, xml, mobi, 
         assert found.returncode == 0, found.stderr
         results = json.loads(found.stdout)['results']
         assert len(results) == 1 and results[0]['library_id'] == 'Second_Library'
+        assert results[0]['authors'] == ['Battistelli, Kate']
         assert 'HTTP 404' in found.stderr
         assert f'Searching: http://127.0.0.1:{servers[1].server_port}' in found.stderr
         assert 'Library ID: Second_Library' in found.stderr
-        fetch_args = (['search', '--author', 'Kate Battistelli', '--select'] if interactive else
+        fetch_args = (['search', '--author', 'Kate Battistelli', '--title', 'The God Dare', '--select'] if interactive else
                       ['download', '--id', results[0]['key'], '--format', 'mobi'])
         fetched = subprocess.run(command + fetch_args, input='1\n\n' if interactive else None,
                                  capture_output=True, text=True, timeout=10)

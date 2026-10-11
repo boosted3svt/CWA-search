@@ -36,3 +36,26 @@ def test_length_and_absolute_link(xml):
     xml = xml.replace(b'href="/get/mobi/', b'length="256" href="http://books.test/get/mobi/')
     book = parse_feed(xml, 'http://books.test', 'http://books.test')[0][0]
     assert book.acquisitions[1].length == 256
+
+
+@pytest.mark.parametrize('stored,query', [
+    ('Battistelli, Kate', 'Kate Battistelli'),
+    ('Kate Battistelli', 'Battistelli, Kate'),
+    (' BATTISTELLI,  Kate ', 'kate battistelli'),
+    ('van der Meer, Anna', 'Anna van der Meer'),
+])
+def test_surname_first_author_matches_in_both_modes(book, stored, query):
+    book.authors = [stored]
+    assert matches(book, author=query)
+    assert matches(book, author=query, exact=True)
+
+
+def test_author_order_normalization_is_not_unordered_token_matching(book):
+    book.authors = ['Battistelli, Kate']
+    assert matches(book, author='Battistelli')
+    assert not matches(book, author='Kate Battistell')
+    assert not matches(book, author='Kate Other')
+    book.authors = ['Kate Other Battistelli']
+    assert not matches(book, author='Kate Battistelli')
+    book.authors = ['Kate Battistelli, Jr.']
+    assert matches(book, author='Kate Battistelli')
