@@ -109,7 +109,7 @@ def make_server(service, host='127.0.0.1', port=8090, password=None, allowed_hos
                     service.cancel(data.get('id'))
                     self.reply(200, {'message': 'Stopping search'})
                 elif path in ('/api/search', '/api/download', '/api/mark-bad'):
-                    if any(not isinstance(data.get(name, ''), str) for name in ('author', 'title', 'id', 'format')):
+                    if any(not isinstance(data.get(name, ''), str) for name in ('author', 'title', 'id', 'format', 'skip_source')):
                         raise ValueError('Search and selection fields must be text')
                     if any(name in data and not isinstance(data[name], bool) for name in
                            ('exact', 'all_libraries', 'include_history', 'keep_timeouts')):

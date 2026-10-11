@@ -48,6 +48,8 @@ class Service:
             key = uuid.uuid4().hex
             self.jobs[key] = {'id': key, 'action': action, 'status': 'running', 'events': [], 'results': [],
                               'include_history': bool(data.get('include_history', False)), 'cancelled': False}
+            if action == 'search':
+                self.jobs[key]['query'] = dict(data)
             self.active = key
             if len(self.jobs) > 32:
                 del self.jobs[next(iter(self.jobs))]
@@ -81,6 +83,9 @@ class Service:
                     result = self.search(key, data, settings, history)
                 else:
                     book = history.book(data['id'])
+                    with self.lock:
+                        self.jobs[key]['selection'] = {'id': book.key, 'title': book.title,
+                                                      'source': book.source, 'format': data.get('format')}
                     acquisition = choose_format(book, settings, history, data.get('format'),
                                                 data.get('include_history', False))
                     if action == 'mark-bad':
@@ -89,6 +94,8 @@ class Service:
                     else:
                         client = make_client(settings, result_library(book, settings.libraries()))
                         self.event(key, f'Downloading {book.title} ({acquisition.format.upper()})…')
+                        with self.lock:
+                            self.jobs[key].update(file_saved=False)
                         try:
                             path = download(client, book, acquisition, settings.download_dir,
                                             settings.max_download_bytes,
@@ -98,6 +105,8 @@ class Service:
                             raise
                         finally:
                             client.close()
+                        with self.lock:
+                            self.jobs[key].update(file_saved=True, saved_path=str(path))
                         history.record(book, acquisition, 'downloaded', path)
                         result = {'message': f'Saved on the server: {path}'}
             with self.lock:
@@ -107,6 +116,12 @@ class Service:
             message = 'Unknown result; search again.' if isinstance(exc, KeyError) else str(exc)
             with self.lock:
                 self.jobs[key].update(status='error', error=message)
+                if action == 'download':
+                    saved = self.jobs[key].get('file_saved', False)
+                    self.jobs[key]['user_message'] = (
+                        'The book was saved, but a later step failed. Check the saved path before retrying.' if saved else
+                        'Download failed. No new ebook was saved; existing files were left unchanged. '
+                        'You can acknowledge this failure and look for a copy on another server.')
         finally:
             with self.lock:
                 self.active = None
@@ -121,6 +136,9 @@ class Service:
         for index, (line, library) in enumerate(libraries, 1):
             if self.snapshot(key)['cancelled']:
                 break
+            if library.url == data.get('skip_source'):
+                self.event(key, f'Skipping {library.url} for this search after the failed download')
+                continue
             self.event(key, f'[{index}/{len(libraries)}] Searching {library.url}')
             client = make_client(settings, library)
             try:
@@ -157,7 +175,7 @@ class Service:
                 client.close()
         history.remember(results, {'author': author, 'title': title})
         cancelled = self.snapshot(key)['cancelled']
-        if not successes and not cancelled:
+        if not successes and not cancelled and failures:
             raise ValueError('No library could be searched successfully. See search activity.')
         output = []
         for book in results:
@@ -170,6 +188,9 @@ class Service:
             item.pop('acquisitions', None)
             item['cover_url'] = f'/api/cover/{book.key}' if book.cover_url else None
             output.append(item)
+        if not successes and not failures and not cancelled:
+            return {'results': [], 'failed_libraries': 0,
+                    'message': 'No other library is configured. Add another server or retry a different format.'}
         return {'results': output, 'failed_libraries': failures,
                 'message': ('Search stopped. ' if cancelled else '') +
                            f'{len(output)} eligible results. {failures} library failures.'}

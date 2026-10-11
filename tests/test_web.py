@@ -208,3 +208,47 @@ def test_cover_cannot_proxy_arbitrary_server(website):
     history.data['books'][book['key']]['cover_url'] = 'http://unconfigured.test/cover.png'
     history.save()
     assert requests.get(url + book['cover_url'], timeout=5).status_code == 400
+
+
+def test_download_failure_explains_outcome_and_can_skip_server(website, monkeypatch):
+    from calibre.downloader import DownloadError
+    from calibre.state import History
+    from config import Settings
+    url, service, directory = website
+    book = search(url)
+    def fail(*args, **kwargs):
+        raise DownloadError('OPDS advertised 242650 bytes; downloaded 250266 bytes; download size differs from the OPDS acquisition length')
+    monkeypatch.setattr('web.service.download', fail)
+    response = post(url, '/api/download', {'id':book['key'], 'format':'mobi'})
+    state = wait_job(url, response.json()['id'])
+    assert state['status'] == 'error'
+    assert not state['file_saved']
+    assert state['selection']['source'] == book['source']
+    assert 'No new ebook was saved' in state['user_message']
+    assert '242650' in state['error']
+    assert not list((directory / 'downloads').glob('*.mobi'))
+    history = History(Settings.load(service.config).history_file)
+    assert history.data['attempts'][book['key']]
+    before = (directory / 'libraries.txt').read_text()
+    response = post(url, '/api/search', {'author':'Emily Rath', 'skip_source':book['source']})
+    next_state = wait_job(url, response.json()['id'])
+    assert next_state['status'] == 'done' and next_state['results'] == []
+    assert 'No other library' in next_state['message']
+    assert (directory / 'libraries.txt').read_text() == before
+
+
+def test_history_write_failure_does_not_claim_saved_file_is_missing(website, monkeypatch):
+    from calibre.state import History
+    url, _, directory = website
+    book = search(url)
+    original = History.record
+    def record(self, book, acquisition, status, path=None):
+        if status == 'downloaded':
+            raise OSError('History update failed')
+        return original(self, book, acquisition, status, path)
+    monkeypatch.setattr(History, 'record', record)
+    response = post(url, '/api/download', {'id':book['key'], 'format':'mobi'})
+    state = wait_job(url, response.json()['id'])
+    assert state['status'] == 'error' and state['file_saved']
+    assert Path(state['saved_path']).exists()
+    assert 'book was saved' in state['user_message']

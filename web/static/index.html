@@ -12,6 +12,11 @@
 <button type="submit" class="primary" id="search-button">Search libraries</button><span id="search-hint">Stops at the first library with eligible matches.</span>
 </form></section>
 <div id="notice" role="status" aria-live="polite"></div>
+<section id="download-error" class="failure-panel" role="alert" hidden>
+<h2 id="failure-heading">✕ Download failed</h2><p id="failure-outcome"></p><p id="failure-selection"></p>
+<details><summary>Technical details</summary><pre id="failure-details"></pre></details>
+<div class="actions"><button id="acknowledge-error" type="button">Acknowledge</button><button id="find-another" type="button" class="primary">Find another server</button></div>
+</section>
 <section id="activity-panel" class="panel" hidden><h2>Activity</h2><button id="stop-button" type="button" hidden>Stop search</button><pre id="activity" aria-live="off"></pre></section>
 <section aria-label="Search results"><div class="result-heading"><h2 id="result-heading">Results will appear here</h2></div><div id="results" class="results"></div></section>
 <section class="panel settings"><h2>Download folder</h2><p>Files are saved on the machine running this application, rather than on the device using this page.</p><form id="settings-form"><label>Server folder<input id="download-dir" required></label><button type="submit">Save folder</button></form><p id="timeout-note"></p></section>

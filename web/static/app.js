@@ -2,6 +2,8 @@
 const $ = id => document.getElementById(id);
 let busy = false;
 let currentJob = null;
+let lastSearch = null;
+let failedSelection = null;
 function notice(message, error = false) { $('notice').textContent = message; $('notice').className = error ? 'error' : ''; }
 function setBusy(value) { busy = value; document.querySelectorAll('button').forEach(button => { button.disabled = value; }); }
 async function api(path, data) {
@@ -25,6 +27,7 @@ async function run(action, data) {
   setBusy(true); notice(action === 'search' ? 'Searching your libraries…' : 'Working…');
   $('activity-panel').hidden = false; $('activity').textContent = '';
   try {
+    if (action === 'search') { lastSearch = {...data}; $('download-error').hidden = true; }
     const job = await api(`/api/${action}`, data);
     currentJob = job.id;
     await followJob(job, action, data.include_history);
@@ -41,7 +44,12 @@ async function followJob(job, action, includeHistory) {
       $('stop-button').disabled = state.cancelled;
       $('activity').textContent = state.events.join('\n'); $('activity').scrollTop = $('activity').scrollHeight;
     } while (state.status === 'running');
-    if (state.status === 'error') throw new Error(state.error);
+    if (state.status === 'error') {
+      if (state.action === 'download') showDownloadFailure(state);
+      throw new Error(state.user_message || state.error);
+    }
+    if (state.action === 'search') lastSearch = state.query || lastSearch;
+    if (state.action === 'download') markCard(state.selection, 'saved', '✓ Saved on server');
     if (state.action === 'search') showResults(state.results, includeHistory || state.include_history);
     notice(state.message || 'Completed.');
     await loadSettings();
@@ -52,12 +60,12 @@ function node(tag, text, className) { const element = document.createElement(tag
 function showResults(books, includeHistory) {
   $('results').replaceChildren(); $('result-heading').textContent = books.length ? `${books.length} matching ${books.length === 1 ? 'book' : 'books'}` : 'No eligible matches';
   for (const book of books) {
-    const card = node('article', '', 'book');
+    const card = node('article', '', 'book'); card.dataset.bookId = book.key;
     const fallback = node('div', 'No cover available', 'cover placeholder');
     if (book.cover_url) {
       const image = document.createElement('img'); image.className = 'cover'; image.src = book.cover_url; image.alt = `Cover of ${book.title}`; image.loading = 'lazy'; image.addEventListener('error', () => image.replaceWith(fallback)); card.append(image);
     } else card.append(fallback);
-    const details = node('div', ''); details.append(node('h3', book.title), node('p', book.authors.join(', ') || 'Unknown author'));
+    const details = node('div', ''); const badge = node('p', '', 'download-status'); badge.hidden = true; details.append(badge); details.append(node('h3', book.title), node('p', book.authors.join(', ') || 'Unknown author'));
     details.append(node('p', `${book.source} · ${book.library_id || 'Default library'}`, 'source'));
     if (book.description) {
       const disclosure = document.createElement('details'); disclosure.append(node('summary', 'Description'));
@@ -74,7 +82,33 @@ function showResults(books, includeHistory) {
     });
     actions.append(download, bad); details.append(actions); card.append(details); $('results').append(card);
   }
+  setBusy(busy);
 }
+function markCard(selection, status, text) {
+  if (!selection) return;
+  for (const card of document.querySelectorAll('.book')) {
+    if (card.dataset.bookId !== selection.id) continue;
+    card.classList.remove('download-failed', 'download-saved'); card.classList.add(`download-${status}`);
+    const badge = card.querySelector('.download-status'); badge.textContent = text; badge.hidden = false;
+  }
+}
+function showDownloadFailure(state) {
+  failedSelection = state.selection;
+  markCard(state.selection, state.file_saved ? 'saved' : 'failed', state.file_saved ? '✓ File saved; follow-up failed' : '✕ Download failed — no new file saved');
+  $('download-error').hidden = false;
+  $('failure-heading').textContent = state.file_saved ? 'File saved — follow-up failed' : '✕ Download failed';
+  $('failure-outcome').textContent = state.user_message;
+  $('failure-selection').textContent = state.selection ? `${state.selection.title} · ${state.selection.source} · ${(state.selection.format || '').toUpperCase()}` : '';
+  $('failure-details').textContent = state.error + (state.saved_path ? `\nSaved path: ${state.saved_path}` : '');
+  $('find-another').hidden = Boolean(state.file_saved) || !state.selection;
+  $('download-error').scrollIntoView({behavior:'smooth', block:'center'});
+}
+$('acknowledge-error').addEventListener('click', () => { $('download-error').hidden = true; notice('Failure acknowledged. The result remains marked; select another format or search for another copy.'); });
+$('find-another').addEventListener('click', () => {
+  if (!failedSelection || busy) return;
+  const query = lastSearch || {author:$('author').value.trim(), title:$('title').value.trim() || failedSelection.title};
+  run('search', {...query, include_history:false, skip_source:failedSelection.source});
+});
 $('search-form').addEventListener('submit', event => {
   event.preventDefault(); const author = $('author').value.trim(), title = $('title').value.trim();
   if (!author && !title) { notice('Enter a title or author.', true); return; }
