@@ -75,3 +75,29 @@ def test_browser_download_failure_recovery_and_mobile(website, monkeypatch):
         assert page.locator('.book.download-failed').count() == 0
         assert not list((directory / 'downloads').glob('*.mobi'))
         browser.close()
+
+
+def test_browser_cached_results_show_freshness(website,book):
+    import json
+    from dataclasses import replace
+    from calibre.cache import CatalogStore,now
+    from config import Settings
+    playwright=pytest.importorskip('playwright.sync_api')
+    url,service,directory=website
+    config=json.loads(service.config.read_text());config['catalog_cache_enabled']=True
+    service.config.write_text(json.dumps(config))
+    settings=Settings.load(service.config);library=settings.libraries()[0][1]
+    CatalogStore(settings.catalog_cache_dir).publish(library,[replace(book,source=library.url,library_id='Actual')],now())
+    with playwright.sync_playwright() as runtime:
+        browser=runtime.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+        page=browser.new_page()
+        page.goto(url)
+        page.get_by_role('heading',name='Local catalogs',exact=True).wait_for()
+        assert '2 cached books' not in page.locator('#catalog-summary').inner_text()
+        assert '1 cached books' in page.locator('#catalog-summary').inner_text()
+        page.get_by_label('Author',exact=True).fill('Emily Rath')
+        page.get_by_role('button',name='Search libraries',exact=True).click()
+        page.get_by_role('heading',name='1 matching book',exact=True).wait_for()
+        assert 'Catalog refreshed:' in page.locator('.book').inner_text()
+        assert page.locator('.book img').count()==0
+        browser.close()

@@ -6,7 +6,13 @@
   "search_path": "/opds/search/{searchTerms}",
   "auto_discover": true,
   "opds_path": "/opds",
-  "preferred_formats": ["mobi", "epub", "azw3", "azw", "pdf"],
+  "preferred_formats": [
+    "mobi",
+    "epub",
+    "azw3",
+    "azw",
+    "pdf"
+  ],
   "timeout": 10,
   "retries": 1,
   "max_pages": 10,
@@ -15,5 +21,12 @@
   "prune_timeouts": true,
   "allowed_hosts": [],
   "username_env": "CALIBRE_USERNAME",
-  "password_env": "CALIBRE_PASSWORD"
+  "password_env": "CALIBRE_PASSWORD",
+  "catalog_cache_enabled": false,
+  "catalog_refresh_interval_hours": 24,
+  "catalog_cache_dir": "state/catalogs",
+  "catalog_max_pages": 10000,
+  "catalog_max_books": 500000,
+  "catalog_request_delay": 0.25,
+  "catalog_cache_covers": false
 }

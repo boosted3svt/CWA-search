@@ -2,7 +2,7 @@
 
 A Python 3.8+ CLI and LAN browser interface for searching multiple configured ebook libraries, filtering title/author metadata, selecting a book, and safely downloading its advertised acquisition link. It defaults to MOBI, then EPUB, AZW3, AZW, PDF. Use libraries you are authorized to access.
 
-The browser interface displays cover thumbnails and uses the same search, validation, and JSON history as the CLI. No Docker, database, scheduling, or CWA-specific integration is required.
+The browser interface displays cover thumbnails and uses the same search, validation, and JSON history as the CLI. Docker Compose deployment and optional daily local catalog snapshots are available; no database or CWA-specific integration is required.
 
 ## Ubuntu setup
 
@@ -66,7 +66,71 @@ Only one search, download, or rejection operation runs at a time across all brow
 
 Keep this service on a trusted LAN rather than exposing port 8090 to the Internet. By default, everyone able to reach the service can search, trigger downloads, reject formats, and change the server download folder. Optional shared access protection uses the `CALIBRE_WEB_PASSWORD` environment variable; supply it securely before starting the service, then log in at the browser prompt with username `calibre`. HTTP Basic authentication over HTTP is unencrypted; use a properly configured HTTPS deployment for untrusted networks. No CORS access is enabled, and browser mutations require same-origin UI requests. LAN IP addresses, localhost, and the machine hostname are accepted; for a custom LAN DNS name, add `--allowed-host books.lan` to the startup command.
 
-Press Ctrl+C to stop the service. It waits for a running background operation to finish; stop long searches in the UI first. The terminal command is the initial deployment workflow; automatic startup and Docker are not included. Jobs/progress are held in memory and disappear when the server restarts; configuration, history, downloads, and timeout-removal backups remain on disk. Repeat the startup command after a restart.
+Press Ctrl+C to stop the service. It waits for a running background operation to finish; stop long searches in the UI first. For detached operation and restart after reboot, use the Docker Compose instructions below. Jobs/progress are held in memory and disappear when the server restarts; configuration, history, downloads, and timeout-removal backups remain on disk. Repeat the startup command after a restart.
+
+## Daily catalog snapshots and local GUI search
+
+Add these fields to your **existing** `config.json` (keep the surrounding JSON valid, including commas):
+
+```json
+"catalog_cache_enabled": true,
+"catalog_refresh_interval_hours": 24,
+"catalog_cache_dir": "state/catalogs",
+"catalog_max_pages": 10000,
+"catalog_max_books": 500000,
+"catalog_request_delay": 0.25,
+"catalog_cache_covers": false
+```
+
+Caching is disabled by default to preserve the current live-search workflow. With the flag enabled, the web service checks for due catalogs on startup and every minute. A library is refreshed when its last attempt was at least 24 hours ago, or it has no previous attempt. The interval survives restarts. New entries in `libraries.txt` become due automatically. This is an interval schedule, not a particular local clock time. The application must be running; a missed interval is caught up at the next startup. An interrupted in-progress scan is retried after restart. Failed complete attempts wait until the next interval unless you click **Refresh catalogs now**.
+
+Polling discovers each server's library ID and follows its advertised **By Title / All Books** acquisition catalog through every next page. It does not use a broad search query as a substitute for enumeration, and it does not trust the advertised last-page link (the verified server advertises a last link that misses its final entry). Original Calibre navigation is supported; servers with ambiguous/unsupported catalog navigation report a refresh failure and keep any prior snapshot. Explicit `?library_id=ID` entries remain authoritative.
+
+Each completed scan writes `server-key_YYYY-MM-DDTHHMMSSffffffZ.json` plus an atomic active pointer in `state/catalogs/index.json`. A successful refresh replaces the entire book list, naturally adding new books and removing absent ones. The previous JSON is deleted only after the new file and pointer are saved. Failed HTTP requests, unsafe XML, loops, cancellation, missing identifiers, or configured page/book limits do **not** publish a partial catalog. The previous complete snapshot remains searchable, with its last-success date and latest error shown. Polling failures do not prune `libraries.txt`; cached results remain available for temporarily unreachable libraries. Live searches with caching disabled retain their existing timeout-removal behavior.
+
+With caching enabled, GUI searches read local snapshots only. Libraries not yet scanned are skipped with a visible message; there is no automatic live-search fallback. The first scan must finish before those libraries become searchable. Book metadata is deduplicated by server/library/identifier. Search uses the existing title/author and history filters, stopping at the first library with eligible matches unless **Search all libraries** is selected. Local matches are limited by `max_results` per library. Downloads connect live to the selected source and retain all current origin, integrity, and overwrite checks. Cached availability does not guarantee the server is currently online or the ebook still exists; failed downloads use the existing red badge and recovery controls. The CLI `main.py search` remains a live-search tool.
+
+The **Local catalogs** panel shows per-library counts, freshness, errors, and refresh activity. **Refresh catalogs now** starts a forced refresh of the list; **Stop refresh** stops between requests and keeps complete snapshots already published. Stopping pauses automatic polling for one refresh interval, until a manual refresh, or until the service restarts. Refresh uses a separate worker, so local searches and downloads remain available while it runs. Servers are scanned sequentially, with a delay between catalog requests; a live user download can overlap that worker. Cache files contain the complete catalog metadata and acquisition links but no authentication values.
+
+To keep GUI searches fully local, thumbnails are **not fetched live in cached mode**. Set `catalog_cache_covers` to true to download thumbnails during polling (best effort, with origin checks and a 2 MB per-image limit). Otherwise cached results show placeholders. Cover caching can add considerable scan time and disk use; covers are reused locally and unavailable covers do not invalidate an otherwise complete metadata catalog. Removed-book thumbnail files can remain on disk; JSON snapshot replacement does not purge the cover directory.
+
+Full catalogs can take hours across many servers. JSON processing reads one catalog into memory at a time; very large libraries may require more RAM or a later storage redesign. `catalog_max_pages` bounds navigation plus catalog pages, and reaching either limit produces a failed refresh, never a successful truncated snapshot. Remote catalogs can change while paginating; without a server-side snapshot API, the refresh represents the completed traversal rather than a transactional instant on the remote server.
+
+## Docker Compose: start, stop, and automatic restart
+
+Stop the foreground web process with Ctrl+C first so port 8090 is free. From the project directory:
+
+```bash
+git pull --ff-only
+id -u
+id -g
+```
+
+Create `.env` using `.env.example` as a guide. Set `CWA_UID` and `CWA_GID` to the two numbers above so the container can write your configuration, history, downloads, and caches. Preserve any existing `.env`. The default port is 8090. Your project directory is mounted as `/data`; do not copy or overwrite your existing `libraries.txt` or history.
+
+For Docker, use paths relative to the config directory in `config.json`:
+
+```json
+"libraries_file": "libraries.txt",
+"download_dir": "downloads",
+"history_file": "state/history.json",
+"catalog_cache_dir": "state/catalogs"
+```
+
+If the GUI previously saved an absolute host path such as `/media/NAS/CWA-search/downloads`, change it to `downloads` before starting Docker. Inside Docker, the GUI shows `/data/downloads`; that maps to the same `downloads/` folder on the host. To use another ingest folder, bind-mount it through `compose.override.yaml` and select its **container path** in the GUI. The process must have write access to that folder.
+
+```bash
+docker compose up -d --build     # Build and start in the background
+docker compose ps              # Check status
+docker compose logs --tail 50   # Read logs without attaching
+docker compose stop            # Stop the application
+docker compose start           # Start it again
+docker compose restart         # Restart after a config change
+```
+
+Open the same `http://SERVER_LAN_IP:8090` address. You can close the terminal; `restart: unless-stopped` restarts the service after a reboot when Docker itself starts. Settings, downloads, history, and catalog snapshots persist in your bind-mounted directory. `docker compose down` removes the container/network but does not delete those host files. After updating code, run `docker compose up -d --build` again; `restart` alone does not rebuild the image.
+
+`CWA_DATA_DIR` in `.env` can point to a different persistent data directory containing `config.json` and `libraries.txt`; cache/download paths should remain relative to it. `CWA_BIND_IP` can restrict the published port to a LAN interface. Optional `CALIBRE_WEB_PASSWORD`, `CALIBRE_USERNAME`, and `CALIBRE_PASSWORD` can be set in `.env`, which is ignored by Git and excluded from the image. The image contains application code and runtime dependencies only, not your library list, history, `.env`, or snapshots. As before, keep this service on a trusted LAN.
 
 ## Search, select, and download
 

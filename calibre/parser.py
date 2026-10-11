@@ -51,7 +51,7 @@ def catalog_links(xml, feed_url):
     return list(dict.fromkeys(searches)), list(dict.fromkeys(libraries))
 
 
-def parse_feed(xml: bytes, feed_url: str, source: str, library_id: str = ''):
+def parse_feed(xml: bytes, feed_url: str, source: str, library_id: str = '', include_formatless=False):
     root = atom_root(xml)
     books = []
     for entry in root.findall(ATOM + 'entry'):
@@ -92,7 +92,7 @@ def parse_feed(xml: bytes, feed_url: str, source: str, library_id: str = ''):
             length = int(raw_length) if raw_length and raw_length.isdigit() else None
             book.acquisitions.append(Acquisition(fmt, url, media_type, length))
         book.cover_url = thumbnail or cover
-        if book.title and book.acquisitions:
+        if book.title and (book.acquisitions or include_formatless):
             books.append(book)
     next_url = None
     for link in root.findall(ATOM + 'link'):

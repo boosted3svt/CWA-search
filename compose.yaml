@@ -1,0 +1,21 @@
+services:
+  cwa-search:
+    build: .
+    image: cwa-search:local
+    init: true
+    restart: unless-stopped
+    user: "${CWA_UID:-1000}:${CWA_GID:-1000}"
+    ports:
+      - "${CWA_BIND_IP:-0.0.0.0}:${CWA_PORT:-8090}:8090"
+    volumes:
+      - "${CWA_DATA_DIR:-.}:/data"
+    environment:
+      CALIBRE_WEB_PASSWORD: "${CALIBRE_WEB_PASSWORD:-}"
+      CALIBRE_USERNAME: "${CALIBRE_USERNAME:-}"
+      CALIBRE_PASSWORD: "${CALIBRE_PASSWORD:-}"
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,base64,urllib.request; p=os.environ.get('CALIBRE_WEB_PASSWORD'); h={'Authorization':'Basic '+base64.b64encode(('calibre:'+p).encode()).decode()} if p else {}; r=urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8090/api/settings',headers=h),timeout=3); assert r.status==200"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

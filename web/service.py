@@ -9,6 +9,8 @@ from calibre.state import History, state_lock, atomic_text, prune_library
 from calibre.client import ClientError, LibraryTimeout
 from calibre.parser import FeedError
 from calibre.matcher import matches
+from calibre.cache import CatalogManager, CatalogStore, is_stale
+from calibre.images import fetch_image, image_type
 from calibre.downloader import download, SUPPORTED_FORMATS
 from main import make_client, choose_format, result_library
 
@@ -24,6 +26,7 @@ class Service:
         self.lock = threading.Lock()
         self.jobs = {}
         self.active = None
+        self.catalogs = CatalogManager(self.config)
         self.cover_slots = threading.BoundedSemaphore(2)
 
     def settings(self):
@@ -35,7 +38,7 @@ class Service:
         with self.lock:
             active = self.active
         return {'download_dir': settings.download_dir, 'library_count': count, 'active_job': active,
-                'prune_timeouts': settings.prune_timeouts}
+                'prune_timeouts': settings.prune_timeouts, 'catalog_cache_enabled': settings.catalog_cache_enabled}
 
     def submit(self, action, data):
         if action not in ('search', 'download', 'mark-bad'):
@@ -133,6 +136,7 @@ class Service:
         if not libraries:
             raise ValueError('Add library URLs to libraries.txt on the server first.')
         results, failures, successes = [], 0, 0
+        cache_dates = {}
         for index, (line, library) in enumerate(libraries, 1):
             if self.snapshot(key)['cancelled']:
                 break
@@ -140,25 +144,41 @@ class Service:
                 self.event(key, f'Skipping {library.url} for this search after the failed download')
                 continue
             self.event(key, f'[{index}/{len(libraries)}] Searching {library.url}')
-            client = make_client(settings, library)
+            client = None if settings.catalog_cache_enabled else make_client(settings, library)
+            entry = {}
             try:
-                books = client.search(term)
+                if settings.catalog_cache_enabled:
+                    books, entry = CatalogStore(settings.catalog_cache_dir).read(library)
+                    if books is None:
+                        self.event(key, f'{library.url}: no complete cached catalog yet; refresh catalogs first')
+                        failures += 1
+                        continue
+                    self.event(key, f'Local snapshot: {entry.get("last_success")}'+
+                               (' (latest refresh failed; older data retained)' if entry.get('error') else ''))
+                else:
+                    books = client.search(term)
                 successes += 1
                 selected = [b for b in books if matches(b, title, author, data.get('exact', False))
                             and any(a.format in SUPPORTED_FORMATS for a in
                                     history.available(b, data.get('include_history', False)))]
-                if client.discovery_message:
+                if client and client.discovery_message:
                     self.event(key, client.discovery_message)
                 self.event(key, f'{len(books)} catalog results; {len(selected)} eligible matches')
+                if settings.catalog_cache_enabled and len(selected) > settings.max_results:
+                    selected = selected[:settings.max_results]
+                    self.event(key, f'Local results limited to {settings.max_results} per library')
                 if books and not selected:
                     for book in books[:5]:
                         reason = ('title/author mismatch' if not matches(book, title, author, data.get('exact', False))
                                   else 'no untried supported format (check download history)')
                         self.event(key, f'Excluded: {book.title} — {", ".join(book.authors)}: {reason}')
-                if client.truncated:
+                if client and client.truncated:
                     self.event(key, 'Configured page/result limit reached.')
                 known = {b.key for b in results}
                 results.extend(b for b in selected if b.key not in known)
+                if settings.catalog_cache_enabled:
+                    for book in selected:
+                        cache_dates[book.key] = entry
                 if selected and not data.get('all_libraries', False):
                     break
             except LibraryTimeout:
@@ -172,7 +192,8 @@ class Service:
                 failures += 1
                 self.event(key, f'Search failed: {exc}')
             finally:
-                client.close()
+                if client:
+                    client.close()
         history.remember(results, {'author': author, 'title': title})
         cancelled = self.snapshot(key)['cancelled']
         if not successes and not cancelled and failures:
@@ -186,7 +207,13 @@ class Service:
                                                     include_history=data.get('include_history', False)).format
             # Never send arbitrary acquisition URLs to the browser.
             item.pop('acquisitions', None)
-            item['cover_url'] = f'/api/cover/{book.key}' if book.cover_url else None
+            cover = Path(settings.catalog_cache_dir) / 'covers' / (book.key + '.img')
+            item['cover_url'] = (f'/api/cover/{book.key}' if book.cover_url and
+                                 (not settings.catalog_cache_enabled or cover.exists()) else None)
+            if settings.catalog_cache_enabled:
+                item['cached_at'] = cache_dates[book.key].get('last_success')
+                item['cache_refresh_error'] = cache_dates[book.key].get('error')
+                item['cache_stale'] = is_stale(cache_dates[book.key], settings.catalog_refresh_interval_hours)
             output.append(item)
         if not successes and not failures and not cancelled:
             return {'results': [], 'failed_libraries': 0,
@@ -223,29 +250,13 @@ class Service:
         book = History(settings.history_file).book(key)
         if not book.cover_url:
             raise ValueError('No cover available')
+        if settings.catalog_cache_enabled:
+            path = Path(settings.catalog_cache_dir) / 'covers' / (book.key + '.img')
+            body = path.read_bytes()
+            return body, image_type(body)
         client = make_client(settings, result_library(book, settings.libraries()))
-        response = None
         with self.cover_slots:
             try:
-                response, _ = client.get(book.cover_url)
-                body = bytearray()
-                for chunk in response.iter_content(65536):
-                    body.extend(chunk)
-                    if len(body) > 2_000_000:
-                        raise ValueError('Cover exceeds size limit')
-                body = bytes(body)
-                if body.startswith(b'\xff\xd8\xff'):
-                    media = 'image/jpeg'
-                elif body.startswith(b'\x89PNG\r\n\x1a\n'):
-                    media = 'image/png'
-                elif body[:6] in (b'GIF87a', b'GIF89a'):
-                    media = 'image/gif'
-                elif body[:4] == b'RIFF' and body[8:12] == b'WEBP':
-                    media = 'image/webp'
-                else:
-                    raise ValueError('Unsupported cover image')
-                return body, media
+                return fetch_image(client, book.cover_url)
             finally:
-                if response is not None:
-                    response.close()
                 client.close()

@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+**/__pycache__
+.pytest_cache
+state
+downloads
+config.json
+libraries.txt
+libraries.txt.bak
+.env
+.env.*
+tests

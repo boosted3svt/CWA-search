@@ -7,3 +7,5 @@ config.json
 libraries.txt
 libraries.txt.bak
 *.part
+.env
+compose.override.yaml

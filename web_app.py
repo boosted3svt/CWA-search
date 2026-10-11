@@ -9,6 +9,8 @@ from pathlib import Path
 import secrets
 import socket
 import ipaddress
+import signal
+import threading
 from urllib.parse import urlsplit
 from web.service import Service, BusyError
 
@@ -72,6 +74,8 @@ def make_server(service, host='127.0.0.1', port=8090, password=None, allowed_hos
                     self.reply(200, (STATIC / name).read_bytes(), media)
                 elif path == '/api/settings':
                     self.reply(200, service.settings())
+                elif path == '/api/catalogs':
+                    self.reply(200, service.catalogs.status())
                 elif path.startswith('/api/jobs/'):
                     self.reply(200, service.snapshot(path.rsplit('/', 1)[1]))
                 elif path.startswith('/api/cover/'):
@@ -103,6 +107,12 @@ def make_server(service, host='127.0.0.1', port=8090, password=None, allowed_hos
                 path = urlsplit(self.path).path
                 if path == '/api/settings':
                     self.reply(200, service.save_folder(data.get('download_dir')))
+                elif path == '/api/catalogs/refresh':
+                    started = service.catalogs.refresh(force=True)
+                    self.reply(202 if started else 409, {'started': started, 'error': 'Refresh already running'} if not started else {'started': True})
+                elif path == '/api/catalogs/stop':
+                    service.catalogs.cancel()
+                    self.reply(200, {'message': 'Stopping catalog refresh'})
                 elif path == '/api/cancel':
                     if not isinstance(data.get('id'), str):
                         raise ValueError('Expected a search job ID')
@@ -137,6 +147,14 @@ def cli():
     args = parser.parse_args()
     service = Service(args.config)
     server = make_server(service, args.host, args.port, os.environ.get('CALIBRE_WEB_PASSWORD'), args.allowed_host)
+    service.catalogs.start()
+    def terminate(signum, frame):
+        service.catalogs.stop.set()
+        with service.lock:
+            if service.active:
+                service.jobs[service.active]['cancelled'] = True
+        threading.Thread(target=server.shutdown, daemon=True).start()
+    signal.signal(signal.SIGTERM, terminate)
     print(f'Calibre search listening on {args.host}:{server.server_port}', flush=True)
     print('Downloads are saved on this server. Press Ctrl+C to stop.', flush=True)
     try:
@@ -145,6 +163,7 @@ def cli():
         pass
     finally:
         server.server_close()
+        service.catalogs.close()
         service.executor.shutdown(wait=True)
     return 0
 

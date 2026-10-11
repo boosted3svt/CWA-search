@@ -252,3 +252,57 @@ def test_history_write_failure_does_not_claim_saved_file_is_missing(website, mon
     assert state['status'] == 'error' and state['file_saved']
     assert Path(state['saved_path']).exists()
     assert 'book was saved' in state['user_message']
+
+
+def test_cached_search_uses_no_live_library_and_download_still_does(website, monkeypatch, book, mobi):
+    from dataclasses import replace
+    from calibre.cache import CatalogStore, now
+    from config import Settings
+    url, service, directory = website
+    settings = Settings.load(service.config)
+    library = settings.libraries()[0][1]
+    data = json.loads(service.config.read_text())
+    data['catalog_cache_enabled'] = True
+    service.config.write_text(json.dumps(data))
+    cached = replace(book, source=library.url, library_id='Actual',
+                     acquisitions=[replace(a,url=a.url.replace('http://books.test',library.url).replace('Calibre_Library','Actual')) for a in book.acquisitions])
+    CatalogStore(settings.catalog_cache_dir).publish(library,[cached],now())
+    from web.service import make_client as original
+    calls = []
+    def tracked(*args,**kwargs):
+        calls.append('network-client')
+        return original(*args,**kwargs)
+    monkeypatch.setattr('web.service.make_client',tracked)
+    result = search(url)
+    assert calls == [] and result['cached_at']
+    assert result['cover_url'] is None  # No live thumbnail fetch in cached mode.
+    response = post(url,'/api/download',{'id':result['key'],'format':'mobi'})
+    state = wait_job(url,response.json()['id'])
+    assert state['status'] == 'done' and calls == ['network-client']
+    assert next((directory/'downloads').glob('*.mobi')).read_bytes() == mobi
+
+
+def test_refresh_api_publishes_full_catalog_while_local_search_remains_available(website, monkeypatch, book):
+    from dataclasses import replace
+    from config import Settings
+    url,service,directory = website
+    config = json.loads(service.config.read_text()); config['catalog_cache_enabled']=True
+    service.config.write_text(json.dumps(config))
+    library = Settings.load(service.config).libraries()[0][1]
+    entered,release = threading.Event(),threading.Event()
+    def scan(*args,**kwargs):
+        entered.set(); assert release.wait(5)
+        return [replace(book,source=library.url,library_id='Actual')]
+    monkeypatch.setattr('calibre.cache.full_catalog',scan)
+    response = post(url,'/api/catalogs/refresh',{})
+    assert response.status_code == 202
+    try:
+        assert entered.wait(2)
+        assert requests.get(url+'/api/catalogs',timeout=5).json()['running']
+        assert requests.get(url+'/api/settings',timeout=5).status_code == 200
+        assert post(url,'/api/catalogs/refresh',{}).status_code == 409
+    finally:
+        release.set(); service.catalogs.worker.join(3)
+    assert requests.get(url+'/api/catalogs',timeout=5).json()['libraries'][0]['book_count'] == 1
+    assert search(url)['cached_at']
+    service.catalogs.close()
