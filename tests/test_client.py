@@ -1,8 +1,14 @@
 import requests
 import pytest
-from calibre.client import Client, Library, ClientError, LibraryTimeout
+from calibre.client import Client as RealClient, Library, ClientError, LibraryTimeout
 from calibre.parser import FeedError
 from conftest import Session, Response
+
+def Client(*args, **kwargs):
+    # These tests isolate search/pagination from catalog discovery.
+    kwargs.setdefault('auto_discover', False)
+    return RealClient(*args, **kwargs)
+
 
 EMPTY = b'<feed xmlns="http://www.w3.org/2005/Atom"/>'
 

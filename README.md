@@ -18,7 +18,7 @@ cp libraries.example.txt libraries.txt
 
 For runtime only, install `requirements.txt` instead. No service is needed. The tests use mocked HTTP responses and a temporary local HTTP fixture server, never the example remote library.
 
-Python 3.8 is supported, including Ubuntu's 3.8.10 interpreter. The test dependency is pinned to pytest 8.3.5 because pytest 8.4 requires Python 3.9+. If pip reports no matching pytest version after an update, run `git pull` (or download the current ZIP) and retry the installation. Check the virtual environment's interpreter with `.venv/bin/python --version`; upgrading pip does not change that interpreter. The dependency installation and all 38 tests were verified on Python 3.8.20 and 3.12.14.
+Python 3.8 is supported, including Ubuntu's 3.8.10 interpreter. The test dependency is pinned to pytest 8.3.5 because pytest 8.4 requires Python 3.9+. If pip reports no matching pytest version after an update, run `git pull` (or download the current ZIP) and retry the installation. Check the virtual environment's interpreter with `.venv/bin/python --version`; upgrading pip does not change that interpreter. Dependency installation and the test suite were verified on Python 3.8.20 and 3.12.14.
 
 Edit `libraries.txt` to list one server per line. Blank lines and lines beginning with `#` are ignored. Addresses and library identifiers are not hardcoded:
 
@@ -28,7 +28,18 @@ http://204.111.163.115:8080?library_id=Calibre_Library
 https://books.example.org?library_id=Other_Library
 ```
 
-The first line illustrates the server in the handoff; it is not included as an enabled default. For each server, `library_id` in its URL overrides the configuration default. Bare `HOST:PORT` uses HTTP. Do not put passwords in URLs.
+The first line illustrates the server in the handoff; it is not included as an enabled default. Bare `HOST:PORT` uses HTTP. Do not put passwords in URLs.
+
+Before searching, the client reads each server's `/opds` catalog and uses its advertised search URL, including its own `library_id`. A single advertised library navigation link is followed when necessary, with bounded depth and loop checks. You can normally list bare addresses without knowing their IDs:
+
+```text
+204.111.163.115:8080
+205.209.236.19:8080
+```
+
+An explicit `?library_id=ID` in a library-list URL takes precedence and scopes discovery to that library. The shared `library_id` setting is a fallback, not a value forced onto every discovered server. If a catalog advertises multiple libraries without a single default search, specify the desired ID in that server's line instead of guessing. If `/opds` returns 404 or has no supported search template, the client reports the fallback and uses `search_path` with the configured default ID. Authentication errors and invalid XML remain errors. Set `auto_discover` to false to use the configured search template directly, or set `opds_path` for a different discovery endpoint.
+
+Each attempted server is reported on stderr, followed by its detected library ID and catalog/eligible result counts. A 404 remains an HTTP error, rather than an assumed empty result; searching continues to the next server. JSON result output remains on stdout.
 
 ## Search, select, and download
 
@@ -97,8 +108,9 @@ Use `--config /path/to/config.json` **before** the subcommand. Configuration pat
 | `libraries_file` | Line-delimited library URLs |
 | `download_dir` | Folder for downloads; can be your local library's ingest folder |
 | `history_file` | JSON book/search/download history |
-| `library_id` | Default library identifier; empty omits the parameter |
-| `search_path` | Endpoint template containing `{searchTerms}`; customize for compatible servers |
+| `library_id` | Fallback library identifier when discovery is unavailable |
+| `search_path` | Fallback template containing `{searchTerms}` |
+| `auto_discover`, `opds_path` | Enable catalog discovery (default true), and its endpoint (default `/opds`) |
 | `preferred_formats` | Default format order |
 | `timeout`, `retries` | Per-request connect/read timeout in seconds, and bounded transient retries |
 | `max_pages`, `max_results` | Per-library raw OPDS page/result limits, before matching |
@@ -109,7 +121,7 @@ Use `--config /path/to/config.json` **before** the subcommand. Configuration pat
 
 Set the named authentication variables through your deployment's secure environment mechanism. The default names are `CALIBRE_USERNAME` and `CALIBRE_PASSWORD`. Authentication is sent only to the configured server origin, never an additional host. This initial version uses one authentication pair and search template across the list; separate configurations can handle groups of servers with different credentials or endpoint templates. HTTP Basic authentication over HTTP is unencrypted; use HTTPS for authenticated deployments.
 
-Original Calibre content-server behavior is implemented. Configurable templates can handle compatible OPDS servers; Calibre-Web/CWA-specific adapters have not been implemented or validated. No endpoint discovery is claimed.
+Original Calibre content-server behavior is implemented. Configurable templates can handle compatible OPDS servers; Calibre-Web/CWA-specific adapters have not been implemented or validated. Discovery supports Atom-advertised `{searchTerms}` templates and library navigation links; separate OpenSearch description documents are not supported.
 
 ## Download checks and boundaries
 
@@ -128,4 +140,4 @@ Feeds use entity-safe XML parsing and a 5 MB response limit. Pagination has page
 - `calibre/state.py`: JSON history, locks, library-list removal.
 - `config.py`, `main.py`: settings and CLI.
 
-Run `.venv/bin/python -m pytest -q`. Tests cover parsing, matching, encoding, pagination/limits, unsafe XML, auth/redirect boundaries, HTTP errors/retries/timeouts, download validation/cleanup/overwrite prevention, history/failover, timeout-only pruning, and the local CLI selection/download flow. Remote integration is deliberate and optional, not part of the suite.
+Run `.venv/bin/python -m pytest -q`. Tests cover parsing, matching, encoding, pagination/limits, unsafe XML, auth/redirect boundaries, HTTP errors/retries/timeouts, download validation/cleanup/overwrite prevention, history/failover, timeout-only pruning, library discovery/explicit overrides, and local CLI flows including a first-server 404 followed by discovery and download from a second server with a different ID. Remote integration is deliberate and optional, not part of the suite.

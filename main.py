@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Command-line front end. Library classes are reusable by a future GUI."""
 import argparse
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -13,7 +14,15 @@ from calibre.state import History, prune_library, state_lock
 
 
 def make_client(settings, library):
-    return Client(library, settings.timeout, settings.retries, settings.max_pages, settings.max_results)
+    return Client(library, settings.timeout, settings.retries, settings.max_pages, settings.max_results,
+                  auto_discover=settings.auto_discover, opds_path=settings.opds_path)
+
+
+def result_library(book, libraries):
+    for _, library in libraries:
+        if library.url == book.source and (not library.explicit_id or library.library_id == book.library_id):
+            return replace(library, library_id=book.library_id)
+    raise ValueError('Result source/library is no longer in the library list')
 
 
 def choose_format(book, settings, history, requested=None, include_history=False):
@@ -52,6 +61,7 @@ def search(args, settings, history):
     if not libraries:
         raise ValueError('Library list is empty')
     for line, library in libraries:
+        print(f'Searching: {library.url}', file=sys.stderr)
         client = make_client(settings, library)
         try:
             books = client.search(term)
@@ -60,6 +70,9 @@ def search(args, settings, history):
                         and any(a.format in SUPPORTED_FORMATS for a in history.available(b, args.include_history))]
             known = {b.key for b in results}
             results.extend(b for b in selected if b.key not in known)
+            if getattr(client, 'discovery_message', ''):
+                print(f'  {client.discovery_message}', file=sys.stderr)
+            print(f'  {len(books)} catalog results; {len(selected)} eligible matches', file=sys.stderr)
             if client.truncated:
                 print(f'Configured page/result limit reached at {library.url}', file=sys.stderr)
             if selected and not args.all_libraries:
@@ -72,6 +85,8 @@ def search(args, settings, history):
                 print('Removed timed-out library; previous list saved to .bak', file=sys.stderr)
         except (ClientError, FeedError) as exc:
             failures += 1
+            if getattr(client, 'discovery_message', ''):
+                print(f'  {client.discovery_message}', file=sys.stderr)
             print(f'Search failed at {library.url}: {exc}', file=sys.stderr)
         finally:
             client.close()
@@ -101,7 +116,7 @@ def search(args, settings, history):
         if not 1 <= index <= len(results):
             raise ValueError('Selection is outside the result list')
         book = results[index - 1]
-        library = next(lib for _, lib in libraries if lib.url == book.source and lib.library_id == book.library_id)
+        library = result_library(book, libraries)
         options = history.available(book, args.include_history)
         print('Formats: ' + ', '.join(a.format for a in options))
         default = choose_format(book, settings, history, include_history=args.include_history).format
@@ -147,10 +162,7 @@ def cli():
                     history.record(book, acquisition, 'bad')
                 print('Marked bad; future searches skip these acquisitions.')
                 return 0
-            library = next((lib for _, lib in settings.libraries()
-                            if lib.url == book.source and lib.library_id == book.library_id), None)
-            if library is None:
-                raise ValueError('Result source is no longer in the library list')
+            library = result_library(book, settings.libraries())
             acquire(book, library, settings, history, args.format, args.include_history)
             return 0
     except (ValueError, KeyError, OSError, ClientError, FeedError) as exc:

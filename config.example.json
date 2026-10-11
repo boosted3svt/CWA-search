@@ -4,6 +4,8 @@
   "history_file": "state/history.json",
   "library_id": "",
   "search_path": "/opds/search/{searchTerms}",
+  "auto_discover": true,
+  "opds_path": "/opds",
   "preferred_formats": ["mobi", "epub", "azw3", "azw", "pdf"],
   "timeout": 10,
   "retries": 1,

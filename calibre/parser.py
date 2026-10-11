@@ -1,5 +1,5 @@
 """Parse untrusted OPDS XML without resolving entities or external resources."""
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, parse_qs
 import re
 from defusedxml import ElementTree as ET
 from .models import Acquisition, Book
@@ -19,13 +19,40 @@ class FeedError(ValueError):
     pass
 
 
-def parse_feed(xml: bytes, feed_url: str, source: str, library_id: str = ''):
+def atom_root(xml):
     try:
         root = ET.fromstring(xml)
     except Exception as exc:
         raise FeedError('Invalid or unsafe OPDS XML') from exc
     if root.tag != ATOM + 'feed':
         raise FeedError('Expected an Atom OPDS feed')
+    return root
+
+
+def catalog_links(xml, feed_url):
+    """Return advertised search templates and library navigation links."""
+    root = atom_root(xml)
+    searches, libraries = [], []
+    for link in root.findall(ATOM + 'link'):
+        if link.get('rel') == 'search' and link.get('href'):
+            url = urljoin(feed_url, link.get('href'))
+            url = re.sub(r'%7bsearchTerms%7d', '{searchTerms}', url, flags=re.IGNORECASE)
+            if '{searchTerms}' in url:
+                searches.append(url)
+    for entry in root.findall(ATOM + 'entry'):
+        for link in entry.findall(ATOM + 'link'):
+            href = link.get('href', '')
+            url = urljoin(feed_url, href)
+            media = link.get('type', '')
+            if ('application/atom+xml' in media and
+                    link.get('rel', 'subsection') in ('subsection', 'alternate') and
+                    parse_qs(urlsplit(url).query).get('library_id')):
+                libraries.append(url)
+    return list(dict.fromkeys(searches)), list(dict.fromkeys(libraries))
+
+
+def parse_feed(xml: bytes, feed_url: str, source: str, library_id: str = ''):
+    root = atom_root(xml)
     books = []
     for entry in root.findall(ATOM + 'entry'):
         def value(tag):

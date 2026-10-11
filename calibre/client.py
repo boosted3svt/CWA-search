@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import time
-from urllib.parse import quote, urlencode, urljoin, urlsplit
+from urllib.parse import quote, urlencode, urljoin, urlsplit, urlunsplit, parse_qs, parse_qsl
 import requests
-from .parser import parse_feed, FeedError
+from .parser import parse_feed, catalog_links, FeedError
 
 
 class ClientError(RuntimeError):
@@ -14,6 +14,12 @@ class ClientError(RuntimeError):
 
 class LibraryTimeout(ClientError):
     pass
+
+
+class HttpError(ClientError):
+    def __init__(self, status):
+        self.status = status
+        super().__init__(f'Library returned HTTP {status}')
 
 
 def origin(url):
@@ -34,11 +40,12 @@ class Library:
     allowed_hosts: list[str] = field(default_factory=list)
     username: str | None = None
     password: str | None = field(default=None, repr=False)
+    explicit_id: bool = False
 
 
 class Client:
     def __init__(self, library, timeout=10, retries=1, max_pages=10, max_results=100,
-                 max_feed_bytes=5_000_000, session=None):
+                 max_feed_bytes=5_000_000, session=None, auto_discover=True, opds_path='/opds'):
         self.library = library
         self.base_origin = origin(library.url)
         self.timeout, self.retries = timeout, retries
@@ -48,6 +55,9 @@ class Client:
         # Avoid implicit .netrc credentials on additional hosts.
         self.session.trust_env = False
         self.truncated = False
+        self.auto_discover, self.opds_path = auto_discover, opds_path
+        self.resolved_library_id = library.library_id
+        self.discovery_message = ''
 
     def close(self):
         self.session.close()
@@ -92,7 +102,7 @@ class Client:
             if response.status_code != 200:
                 status = response.status_code
                 response.close()
-                raise ClientError(f'Library returned HTTP {status}')
+                raise HttpError(status)
             return response, url
         raise ClientError('Too many redirects')
 
@@ -112,13 +122,72 @@ class Client:
         finally:
             response.close()
 
-    def search(self, term):
+    def configured_search(self):
         if '{searchTerms}' not in self.library.search_path:
             raise ClientError('search_path must contain {searchTerms}')
         url = urljoin(self.library.url.rstrip('/') + '/',
-                      self.library.search_path.replace('{searchTerms}', quote(term, safe='')))
+                      self.library.search_path)
         if self.library.library_id:
             url += ('&' if '?' in url else '?') + urlencode({'library_id': self.library.library_id})
+        return url
+
+    def discover_search(self):
+        """Use the server's advertised template; explicit IDs remain authoritative."""
+        fallback = self.configured_search()
+        if not self.auto_discover:
+            return fallback
+        url = urljoin(self.library.url.rstrip('/') + '/', self.opds_path)
+        if self.library.explicit_id:
+            url += ('&' if '?' in url else '?') + urlencode({'library_id': self.library.library_id})
+        visited = set()
+        for _ in range(4):
+            if url in visited:
+                raise FeedError('Library discovery loop detected')
+            visited.add(url)
+            try:
+                xml, final_url = self.read_feed(url)
+            except HttpError as exc:
+                if exc.status != 404:
+                    raise
+                self.discovery_message = 'OPDS discovery endpoint returned 404; using configured search template'
+                return fallback
+            searches, libraries = catalog_links(xml, final_url)
+            if self.library.explicit_id:
+                searches = [template for template in searches if
+                            parse_qs(urlsplit(template).query).get('library_id', [self.library.library_id])[0]
+                            == self.library.library_id]
+                libraries = [link for link in libraries if
+                             parse_qs(urlsplit(link).query)['library_id'][0] == self.library.library_id]
+            if len(searches) == 1:
+                template = searches[0]
+                self.check_url(template)
+                parsed = urlsplit(template)
+                discovered_id = parse_qs(parsed.query).get('library_id', [''])[0]
+                if self.library.explicit_id and not discovered_id:
+                    query = parse_qsl(parsed.query, keep_blank_values=True)
+                    query.append(('library_id', self.library.library_id))
+                    template = urlunsplit((parsed.scheme, parsed.netloc, parsed.path,
+                                          urlencode(query, safe='{}'), ''))
+                    discovered_id = self.library.library_id
+                self.resolved_library_id = discovered_id
+                self.discovery_message = f'Library ID: {discovered_id or "server default"} (advertised search)'
+                return template
+            if len(searches) > 1 or len(libraries) > 1:
+                ids = sorted({parse_qs(urlsplit(link).query).get('library_id', [''])[0]
+                              for link in searches + libraries} - {''})
+                choices = ', '.join(repr(value) for value in ids) or 'unspecified IDs'
+                raise ClientError(f'Multiple library catalogs advertised ({choices}); '
+                                  'select one with ?library_id=ID in libraries.txt')
+            if libraries:
+                url = libraries[0]
+                continue
+            self.discovery_message = 'No path search template advertised; using configured search template'
+            return fallback
+        raise FeedError('Library discovery depth limit reached')
+
+    def search(self, term):
+        template = self.discover_search()
+        url = template.replace('{searchTerms}', quote(term, safe=''))
         seen_urls, seen_books, books = set(), set(), []
         self.truncated = False
         for _ in range(self.max_pages):
@@ -126,7 +195,7 @@ class Client:
                 raise FeedError('Pagination loop detected')
             seen_urls.add(url)
             xml, final_url = self.read_feed(url)
-            page, next_url = parse_feed(xml, final_url, self.library.url, self.library.library_id)
+            page, next_url = parse_feed(xml, final_url, self.library.url, self.resolved_library_id)
             for book in page:
                 if book.key not in seen_books:
                     books.append(book)

@@ -14,6 +14,8 @@ class Settings:
     history_file: str = 'state/history.json'
     library_id: str = ''
     search_path: str = '/opds/search/{searchTerms}'
+    auto_discover: bool = True
+    opds_path: str = '/opds'
     preferred_formats: tuple = ('mobi', 'epub', 'azw3', 'azw', 'pdf')
     timeout: float = 10
     retries: int = 1
@@ -56,7 +58,8 @@ class Settings:
         url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip('/'), '', ''))
         return Library(url, query.get('library_id', [self.library_id])[0],
                        self.search_path, list(self.allowed_hosts),
-                       os.environ.get(self.username_env), os.environ.get(self.password_env))
+                       os.environ.get(self.username_env), os.environ.get(self.password_env),
+                       explicit_id='library_id' in query)
 
     def libraries(self):
         path = Path(self.libraries_file)
