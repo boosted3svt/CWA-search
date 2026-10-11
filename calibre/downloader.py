@@ -18,7 +18,27 @@ class DownloadError(ClientError):
 
 def safe_name(title):
     name = re.sub(r'[^\w .()-]', '_', title).strip(' .')[:100].rstrip(' .')
+    # Filesystem limits apply to bytes, not Unicode character counts.
+    name = name.encode('utf-8')[:100].decode('utf-8', errors='ignore').rstrip(' .')
     return name or 'book'
+
+
+def book_filename(book, fmt):
+    """Use catalog metadata, not remote filenames, with a scoped ID for uniqueness."""
+    from .matcher import normalize
+    title = safe_name(book.title)
+    # Preserve readable capitalization while normalizing explicit surname-first names.
+    names = []
+    for author in book.authors:
+        parts = author.split(',')
+        if len(parts) == 2 and all(part.strip() for part in parts) and normalize(parts[1]) not in ('jr', 'sr', 'ii', 'iii', 'iv'):
+            author = parts[1].strip() + ' ' + parts[0].strip()
+        if normalize(author) and not any(normalize(author) == normalize(name) for name in names):
+            names.append(author)
+    absent = [name for name in names if f' {normalize(name)} ' not in f' {normalize(title)} ']
+    if absent:
+        title += ' - ' + safe_name(', '.join(absent))
+    return f'{title} [{book.key}].{fmt}'
 
 
 def validate(path, fmt):
@@ -65,7 +85,7 @@ def download(client, book, acquisition, destination, max_bytes=100_000_000, on_w
         raise DownloadError('Unsupported download format')
     directory = Path(destination).expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=True)
-    filename = f'{safe_name(book.title)}-{book.key}.{acquisition.format}'
+    filename = book_filename(book, acquisition.format)
     target = directory / filename
     if target.exists():
         raise DownloadError('Destination already exists; refusing to overwrite')

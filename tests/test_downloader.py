@@ -89,3 +89,37 @@ def test_transfer_failure(tmp_path, book):
 def test_unassociated_link(tmp_path, book, mobi):
     with pytest.raises(DownloadError, match='associated'):
         download(client(mobi), book, replace(book.acquisitions[1], url='http://evil.test/book'), tmp_path)
+
+
+def test_filename_contains_title_and_author_from_catalog(tmp_path, book, mobi):
+    book.title = 'The God Dare'
+    book.authors = ['Battistelli, Kate']
+    path = download(client(mobi), book, book.acquisitions[1], tmp_path)
+    assert path.name == f'The God Dare - Kate Battistelli [{book.key}].mobi'
+
+
+def test_filename_does_not_repeat_author_already_in_title(book):
+    from calibre.downloader import book_filename
+    book.title = 'The God Dare by Kate Battistelli'
+    book.authors = ['Battistelli, Kate', 'Kate Battistelli']
+    assert book_filename(book, 'epub').count('Kate Battistelli') == 1
+
+
+def test_filename_multiple_missing_and_unsafe_authors(book):
+    from calibre.downloader import book_filename
+    book.title = 'Example Book'
+    book.authors = ['Emily Rath', 'Other Author', 'Emily Rath']
+    name = book_filename(book, 'epub')
+    assert 'Emily Rath' in name and 'Other Author' in name
+    assert name.count('Emily Rath') == 1
+    book.authors = ['../../Bad / Name']
+    assert '/' not in book_filename(book, 'epub')
+    book.authors = []
+    assert book_filename(book, 'epub') == f'Example Book [{book.key}].epub'
+
+
+def test_unicode_filename_fits_filesystem_limit(book):
+    from calibre.downloader import book_filename
+    book.title = '書' * 100
+    book.authors = ['作' * 100]
+    assert len(book_filename(book, 'epub').encode('utf-8')) <= 255
