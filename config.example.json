@@ -1,0 +1,17 @@
+{
+  "libraries_file": "libraries.txt",
+  "download_dir": "downloads",
+  "history_file": "state/history.json",
+  "library_id": "",
+  "search_path": "/opds/search/{searchTerms}",
+  "preferred_formats": ["mobi", "epub", "azw3", "azw", "pdf"],
+  "timeout": 10,
+  "retries": 1,
+  "max_pages": 10,
+  "max_results": 100,
+  "max_download_bytes": 100000000,
+  "prune_timeouts": true,
+  "allowed_hosts": [],
+  "username_env": "CALIBRE_USERNAME",
+  "password_env": "CALIBRE_PASSWORD"
+}

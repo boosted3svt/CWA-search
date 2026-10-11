@@ -1,0 +1,13 @@
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/">
+ <entry><title>Pucking Around: A Why Choose Hockey Romance</title><author><name>Emily Rath</name></author>
+ <id>urn:uuid:e5234d79-68c0-435e-b16e-a32caf85d5e0</id><updated>2026-01-01</updated><published>2023-03-20</published>
+ <dc:date>2023-03-20</dc:date><content type="html">A hockey romance</content>
+ <link rel="http://opds-spec.org/image/thumbnail" href="/get/thumb/3170/Calibre_Library"/>
+ <link rel="http://opds-spec.org/acquisition" type="application/epub+zip" href="/get/epub/3170/Calibre_Library"/>
+ <link rel="http://opds-spec.org/acquisition" type="application/x-mobipocket-ebook" href="/get/mobi/3170/Calibre_Library"/>
+ </entry>
+ <entry><title>Atonement</title><author><name>Ian McEwan</name></author><id>urn:uuid:other</id><content>Emily Rath mentioned here</content>
+ <link rel="http://opds-spec.org/acquisition" type="application/epub+zip" href="/get/epub/9/Calibre_Library"/>
+ </entry>
+ <link rel="next" href="/opds/search/emily%20rath?library_id=Calibre_Library&amp;offset=30"/>
+</feed>

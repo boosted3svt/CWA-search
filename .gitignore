@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+.pytest_cache/
+downloads/
+state/
+config.json
+libraries.txt
+*.part

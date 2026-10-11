@@ -1,0 +1,75 @@
+"""Parse untrusted OPDS XML without resolving entities or external resources."""
+from urllib.parse import urljoin, urlsplit
+import re
+from defusedxml import ElementTree as ET
+from .models import Acquisition, Book
+
+ATOM = '{http://www.w3.org/2005/Atom}'
+DC = '{http://purl.org/dc/terms/}'
+FORMATS = {
+    'application/epub+zip': 'epub',
+    'application/x-mobipocket-ebook': 'mobi',
+    'application/pdf': 'pdf',
+    'application/vnd.amazon.ebook': 'azw',
+    'application/x-azw3': 'azw3',
+}
+
+
+class FeedError(ValueError):
+    pass
+
+
+def parse_feed(xml: bytes, feed_url: str, source: str, library_id: str = ''):
+    try:
+        root = ET.fromstring(xml)
+    except Exception as exc:
+        raise FeedError('Invalid or unsafe OPDS XML') from exc
+    if root.tag != ATOM + 'feed':
+        raise FeedError('Expected an Atom OPDS feed')
+    books = []
+    for entry in root.findall(ATOM + 'entry'):
+        def value(tag):
+            element = entry.find(tag)
+            return ''.join(element.itertext()).strip() if element is not None else ''
+        book = Book(
+            title=value(ATOM + 'title'),
+            authors=[e.text.strip() for e in entry.findall(ATOM + 'author/' + ATOM + 'name') if e.text],
+            identifier=value(ATOM + 'id'), source=source, library_id=library_id,
+            updated=value(ATOM + 'updated'), published=value(ATOM + 'published'),
+            publication_date=value(DC + 'date'),
+            description=value(ATOM + 'content') or value(ATOM + 'summary'),
+        )
+        thumbnail = None
+        cover = None
+        for link in entry.findall(ATOM + 'link'):
+            href = link.get('href', '')
+            if not href:
+                continue
+            url = urljoin(feed_url, href)
+            rel = link.get('rel', '')
+            if rel in ('http://opds-spec.org/image/thumbnail', 'http://opds-spec.org/thumbnail'):
+                thumbnail = url
+            elif rel in ('http://opds-spec.org/image', 'http://opds-spec.org/cover'):
+                cover = url
+            if rel != 'http://opds-spec.org/acquisition':
+                continue
+            media_type = link.get('type', '').split(';')[0].strip().lower()
+            path = urlsplit(url).path
+            match = re.search(r'/get/([\w]+)/([0-9]+)(?:/|$)', path)
+            fmt = FORMATS.get(media_type) or (match.group(1).lower() if match else None)
+            if not fmt:
+                continue
+            if match:
+                book.book_id = match.group(2)
+            raw_length = link.get('length')
+            length = int(raw_length) if raw_length and raw_length.isdigit() else None
+            book.acquisitions.append(Acquisition(fmt, url, media_type, length))
+        book.cover_url = thumbnail or cover
+        if book.title and book.acquisitions:
+            books.append(book)
+    next_url = None
+    for link in root.findall(ATOM + 'link'):
+        if link.get('rel') == 'next' and link.get('href'):
+            next_url = urljoin(feed_url, link.get('href'))
+            break
+    return books, next_url
