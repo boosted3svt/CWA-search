@@ -3,6 +3,7 @@ import os
 import re
 import struct
 import tempfile
+import logging
 import zipfile
 import requests
 from .client import ClientError
@@ -90,9 +91,15 @@ def download(client, book, acquisition, destination, max_bytes=100_000_000):
             os.fsync(handle.fileno())
         if not size or (expected is not None and size != expected):
             raise DownloadError('Empty or incomplete download')
-        if acquisition.length is not None and size != acquisition.length:
-            raise DownloadError('Download size differs from the OPDS acquisition length')
         validate(temporary, acquisition.format)
+        if acquisition.length is not None and size != acquisition.length:
+            message = (f'OPDS advertised {acquisition.length} bytes; downloaded {size} bytes')
+            if acquisition.format != 'epub':
+                raise DownloadError(message + '; download size differs from the OPDS acquisition length')
+            # Calibre can update EPUB metadata during delivery. The catalog length
+            # may describe the stored file, not the complete delivered ZIP.
+            logging.getLogger(__name__).warning(
+                '%s. EPUB ZIP integrity and container checks passed; keeping the file.', message)
         # Hard-link publication is atomic and fails if another process created target.
         try:
             os.link(temporary, target)

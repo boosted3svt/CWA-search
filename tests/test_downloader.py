@@ -49,6 +49,37 @@ def test_epub_validation(tmp_path, book):
     assert zipfile.is_zipfile(path)
 
 
+def test_valid_epub_with_stale_catalog_length(tmp_path, book, caplog):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w') as archive:
+        archive.writestr('mimetype', 'application/epub+zip')
+        archive.writestr('META-INF/container.xml', '<container/>')
+    body = buffer.getvalue()
+    book.acquisitions[0].length = len(body) + 100
+    path = download(client(body, {'Content-Length': str(len(body))}), book, book.acquisitions[0], tmp_path)
+    assert path.read_bytes() == body
+    assert f'OPDS advertised {len(body) + 100} bytes; downloaded {len(body)} bytes' in caplog.text
+    assert 'checks passed' in caplog.text
+
+
+def test_epub_http_length_mismatch_still_fails(tmp_path, book):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w') as archive:
+        archive.writestr('mimetype', 'application/epub+zip')
+        archive.writestr('META-INF/container.xml', '<container/>')
+    body = buffer.getvalue()
+    with pytest.raises(DownloadError, match='incomplete'):
+        download(client(body, {'Content-Length': str(len(body) + 100)}), book, book.acquisitions[0], tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+def test_invalid_epub_with_stale_length_still_fails(tmp_path, book):
+    book.acquisitions[0].length = 1000
+    with pytest.raises(DownloadError, match='Invalid EPUB'):
+        download(client(b'not a ZIP archive'), book, book.acquisitions[0], tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
 def test_transfer_failure(tmp_path, book):
     with pytest.raises(DownloadError, match='transfer'):
         download(client(b'', error=requests.ConnectionError()), book, book.acquisitions[1], tmp_path)
