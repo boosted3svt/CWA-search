@@ -95,7 +95,8 @@ class Service:
                         history.record(book, acquisition, 'bad')
                         result = {'message': 'Marked this format bad. Future searches skip it.'}
                     else:
-                        client = make_client(settings, result_library(book, settings.libraries()))
+                        library = result_library(book, settings.libraries())
+                        client = make_client(settings, library)
                         self.event(key, f'Downloading {book.title} ({acquisition.format.upper()})…')
                         with self.lock:
                             self.jobs[key].update(file_saved=False)
@@ -103,13 +104,21 @@ class Service:
                             path = download(client, book, acquisition, settings.download_dir,
                                             settings.max_download_bytes,
                                             on_warning=lambda message: self.event(key, message))
-                        except (ClientError, OSError):
+                        except (ClientError, OSError) as exc:
+                            if isinstance(exc, LibraryTimeout):
+                                outcome = self.catalogs.download_outcome(library, timed_out=True)
+                                if outcome:
+                                    self.event(key, f'Consecutive download timeouts: {outcome["timeout_count"]}. '+
+                                               ('Library retired and removed from the list.' if outcome['retired'] else ''))
+                                    with self.lock:
+                                        self.jobs[key]['retirement'] = outcome
                             history.record(book, acquisition, 'failed')
                             raise
                         finally:
                             client.close()
                         with self.lock:
                             self.jobs[key].update(file_saved=True, saved_path=str(path))
+                        self.catalogs.download_outcome(library, success=True)
                         history.record(book, acquisition, 'downloaded', path)
                         result = {'message': f'Saved on the server: {path}'}
             with self.lock:
@@ -125,6 +134,8 @@ class Service:
                         'The book was saved, but a later step failed. Check the saved path before retrying.' if saved else
                         'Download failed. No new ebook was saved; existing files were left unchanged. '
                         'You can acknowledge this failure and look for a copy on another server.')
+                    if self.jobs[key].get('retirement', {}).get('retired'):
+                        self.jobs[key]['user_message'] += ' This library reached the timeout limit and was retired.'
         finally:
             with self.lock:
                 self.active = None

@@ -5,7 +5,7 @@ let currentJob = null;
 let lastSearch = null;
 let failedSelection = null;
 function notice(message, error = false) { $('notice').textContent = message; $('notice').className = error ? 'error' : ''; }
-function setBusy(value) { busy = value; document.querySelectorAll('button').forEach(button => { if (!['refresh-catalogs','refresh-covers','stop-catalogs'].includes(button.id)) button.disabled = value; }); }
+function setBusy(value) { busy = value; document.querySelectorAll('button').forEach(button => { if (!['refresh-catalogs','refresh-covers','stop-catalogs','restore-all-retired','clear-retired','restore-retired'].includes(button.id)) button.disabled = value; }); }
 async function api(path, data) {
   const response = await fetch(path, data === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json','X-OPDS-UI':'1'},body:JSON.stringify(data)});
   const value = await response.json();
@@ -131,22 +131,26 @@ loadSettings().catch(error => notice(error.message, true));
 async function loadCatalogs() {
   try {
     const state = await api('/api/catalogs');
+    renderRetired(state);
     $('catalog-panel').hidden = !state.enabled;
     if (!state.enabled) return;
     const cached = state.libraries.filter(library => library.cached).length;
     const count = state.libraries.reduce((total, library) => total + library.book_count, 0);
-    $('catalog-summary').textContent = `${state.running ? 'Refresh running. ' : ''}${count.toLocaleString()} cached books across ${cached}/${state.libraries.length} libraries. Refresh interval: ${state.interval_hours} hours. Searches use local metadata; downloads connect to the source server.`;
+    $('catalog-summary').textContent = `${state.running ? 'Refresh running. ' : ''}${count.toLocaleString()} cached books across ${cached}/${state.libraries.length} libraries. Refresh interval: ${state.interval_hours} hours. Parallel libraries: ${state.concurrency}. Searches use local metadata; downloads connect to the source server.`;
     $('refresh-catalogs').disabled = state.running;
     $('refresh-covers').disabled = state.running || !state.covers_enabled;
     $('stop-catalogs').hidden = !state.running;
-    const active = state.active;
+    const activeLibraries = state.active_libraries || (state.active ? [state.active] : []);
     const phaseNames = {starting:'Connecting',metadata:'Reading books','metadata-complete':'Books read',covers:'Fetching covers','covers-complete':'Covers checked',complete:'Saving results',saving:'Saving catalog',error:'Refresh failed'};
-    $('catalog-progress').textContent = active ? `${active.source} · ${phaseNames[active.phase] || active.phase} · ${active.count || 0}${active.total !== undefined ? '/'+active.total : ''} · ${Math.round(active.elapsed_seconds)}s elapsed / ${active.deadline_seconds}s limit · Last progress: ${new Date(active.last_activity).toLocaleTimeString()}` : '';
+    $('catalog-progress').replaceChildren();
+    for (const active of activeLibraries) {
+      $('catalog-progress').append(node('p', `${active.source} · ${phaseNames[active.phase] || active.phase} · ${active.count || 0}${active.total !== undefined ? '/'+active.total : ''} · ${Math.round(active.elapsed_seconds)}s elapsed / ${active.deadline_seconds}s limit · Last progress: ${new Date(active.last_activity).toLocaleTimeString()}`, 'source'));
+    }
     $('catalog-events').textContent = state.events.join('\n');
     $('catalog-libraries').replaceChildren();
     for (const library of state.libraries) {
       const date = library.last_success ? new Date(library.last_success).toLocaleString() : 'not yet cached';
-      $('catalog-libraries').append(node('p', `${library.source} · ${library.book_count.toLocaleString()} books · ${date}${library.error ? ' · Refresh failed: '+library.error : (library.stale && library.cached ? ' · Older cached data' : '')}${library.covers_error ? ' · Cover refresh failed: '+library.covers_error : ''}`, 'source'));
+      $('catalog-libraries').append(node('p', `${library.source} · ${library.book_count.toLocaleString()} books · ${date} · Download timeouts: ${library.download_timeout_count || 0}${library.error ? ' · Refresh failed: '+library.error : (library.stale && library.cached ? ' · Older cached data' : '')}${library.covers_error ? ' · Cover refresh failed: '+library.covers_error : ''}`, 'source'));
     }
   } catch (error) { /* Foreground actions report connection failures separately. */ }
 }
@@ -163,3 +167,35 @@ $('refresh-covers').addEventListener('click', async () => {
   catch (error) { notice(error.message, true); }
 });
 loadCatalogs(); setInterval(loadCatalogs, 5000);
+
+function renderRetired(state) {
+  const entries = state.retired || [];
+  $('retired-panel').hidden = entries.length === 0;
+  $('retirement-summary').textContent = `Download timeout limit: ${state.download_timeout_limit === 0 ? 'disabled' : state.download_timeout_limit}. Successful downloads reset the counter. Clearing history does not re-add servers.`;
+  $('restore-all-retired').disabled = !entries.some(item => item.reason === 'download-timeouts' && !item.restored_at);
+  $('retired-entries').replaceChildren();
+  for (const entry of entries.slice().reverse()) {
+    const row = node('div', '', 'retired-entry');
+    const reason = entry.reason === 'download-timeouts' ? 'Download timeout limit reached' : 'Removed from library list';
+    row.append(node('p', `${entry.source}${entry.library_id ? ' · '+entry.library_id : ''} · ${reason} · ${entry.timeout_count} timeouts · ${new Date(entry.retired_at).toLocaleString()}${entry.restored_at ? ' · Restored '+new Date(entry.restored_at).toLocaleString() : ''}`, 'source'));
+    if (!entry.restored_at) {
+      const button = node('button', 'Restore server'); button.type = 'button'; button.className = 'restore-retired';
+      button.addEventListener('click', async () => {
+        try { await api('/api/retired/restore', {id:entry.id}); await loadCatalogs(); await loadSettings(); }
+        catch (error) { notice(error.message, true); }
+      });
+      row.append(button);
+    }
+    $('retired-entries').append(row);
+  }
+}
+$('restore-all-retired').addEventListener('click', async () => {
+  if (!window.confirm('Restore all automatically retired servers with fresh caches and timeout counters? Manually deleted entries will remain removed.')) return;
+  try { await api('/api/retired/restore-all', {confirm:true}); await loadCatalogs(); await loadSettings(); }
+  catch (error) { notice(error.message, true); }
+});
+$('clear-retired').addEventListener('click', async () => {
+  if (!window.confirm('Clear retirement history without re-adding servers?')) return;
+  try { await api('/api/retired/clear', {confirm:true}); await loadCatalogs(); }
+  catch (error) { notice(error.message, true); }
+});

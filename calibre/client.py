@@ -16,6 +16,22 @@ class LibraryTimeout(ClientError):
     pass
 
 
+def is_timeout_error(error):
+    """Requests wraps streamed read timeouts inside ConnectionError arguments."""
+    from urllib3.exceptions import TimeoutError as UrllibTimeout
+    seen, pending = set(), [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (requests.Timeout, UrllibTimeout, TimeoutError)):
+            return True
+        pending.extend(value for value in (current.__cause__, current.__context__, *current.args)
+                       if isinstance(value, BaseException))
+    return False
+
+
 class HttpError(ClientError):
     def __init__(self, status):
         self.status = status

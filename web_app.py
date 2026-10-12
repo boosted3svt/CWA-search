@@ -116,6 +116,19 @@ def make_server(service, host='127.0.0.1', port=8090, password=None, allowed_hos
                 elif path == '/api/catalogs/stop':
                     service.catalogs.cancel()
                     self.reply(200, {'message': 'Stopping catalog refresh'})
+                elif path == '/api/retired/restore':
+                    if not isinstance(data.get('id'), str):
+                        raise ValueError('Expected a retired entry ID')
+                    self.reply(200, {'restored': service.catalogs.restore(data['id'])})
+                elif path == '/api/retired/restore-all':
+                    if data.get('confirm') is not True:
+                        raise ValueError('Confirm restoring all automatically retired servers')
+                    self.reply(200, {'restored': service.catalogs.restore(all_retired=True)})
+                elif path == '/api/retired/clear':
+                    if data.get('confirm') is not True:
+                        raise ValueError('Confirm clearing retirement history')
+                    service.catalogs.clear_retirement_history()
+                    self.reply(200, {'message': 'Retirement history cleared; servers were not re-added'})
                 elif path == '/api/cancel':
                     if not isinstance(data.get('id'), str):
                         raise ValueError('Expected a search job ID')

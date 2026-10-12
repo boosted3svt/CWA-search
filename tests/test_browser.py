@@ -139,3 +139,38 @@ def test_browser_cover_progress_is_visible_and_missing_covers_action_works(websi
             assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
         finally:
             release.set();service.catalogs.worker.join(3);browser.close()
+
+
+def test_browser_parallel_progress_and_retirement_controls(website,monkeypatch):
+    import json,time
+    from config import Settings
+    from calibre.cache import now
+    playwright=pytest.importorskip('playwright.sync_api')
+    url,service,directory=website
+    config=json.loads(service.config.read_text())
+    config.update(catalog_cache_enabled=True,library_download_timeout_limit=1)
+    service.config.write_text(json.dumps(config))
+    settings=Settings.load(service.config);library=settings.libraries()[0][1]
+    service.catalogs.download_outcome(library,timed_out=True)
+    with service.catalogs.lock:
+        for index in (1,2):
+            service.catalogs.activities[str(index)]={'source':f'http://fixture{index}.test','phase':'covers',
+                 'count':20*index,'total':100,'started_monotonic':time.monotonic(),
+                 'last_activity':now(),'deadline_seconds':3600}
+    with playwright.sync_playwright() as runtime:
+        browser=runtime.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+        page=browser.new_page(viewport={'width':390,'height':844})
+        page.goto(url)
+        page.get_by_role('heading',name='Retired servers',exact=True).wait_for()
+        page.wait_for_function('() => document.querySelectorAll("#catalog-progress p").length === 2')
+        assert '20/100' in page.locator('#catalog-progress').inner_text()
+        assert '40/100' in page.locator('#catalog-progress').inner_text()
+        page.get_by_role('button',name='Restore server',exact=True).click()
+        page.wait_for_function('() => document.querySelector("#retired-entries").textContent.includes("Restored")')
+        assert settings.libraries()[0][1].url==library.url
+        page.on('dialog',lambda dialog:dialog.accept())
+        page.get_by_role('button',name='Clear retirement history',exact=True).click()
+        page.wait_for_function('() => document.querySelector("#retired-panel").hidden')
+        assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+        browser.close()
+    with service.catalogs.lock:service.catalogs.activities.clear()

@@ -60,23 +60,39 @@ class History:
 
 
 @contextmanager
-def state_lock(path, cancelled=None):
+def state_lock(path, cancelled=None, shared=False):
     lock = Path(str(path) + '.lock')
     lock.parent.mkdir(parents=True, exist_ok=True)
     with lock.open('a') as handle:
         if cancelled is None:
-            fcntl.flock(handle, fcntl.LOCK_EX)
+            fcntl.flock(handle, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
         else:
             while True:
                 if cancelled():
                     raise RuntimeError('State lock wait cancelled')
                 try:
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(handle, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
                     time.sleep(0.1)
         yield
         fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+@contextmanager
+def try_state_lock(path):
+    lock = Path(str(path) + '.lock')
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open('a') as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def prune_library(path, line):

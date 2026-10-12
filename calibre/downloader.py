@@ -6,7 +6,7 @@ import tempfile
 import logging
 import zipfile
 import requests
-from .client import ClientError
+from .client import ClientError, LibraryTimeout, is_timeout_error
 
 
 SUPPORTED_FORMATS = ('epub', 'mobi', 'azw', 'azw3', 'pdf')
@@ -129,6 +129,8 @@ def download(client, book, acquisition, destination, max_bytes=100_000_000, on_w
             raise DownloadError('Destination already exists; refusing to overwrite') from exc
         return target
     except requests.RequestException as exc:
+        if is_timeout_error(exc):
+            raise LibraryTimeout('Ebook transfer timed out') from exc
         raise DownloadError('Download transfer failed') from exc
     finally:
         response.close()

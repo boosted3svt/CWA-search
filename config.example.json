@@ -30,5 +30,7 @@
   "catalog_request_delay": 0.25,
   "catalog_cache_covers": false,
   "catalog_library_timeout_seconds": 3600,
-  "catalog_checkpoint_max_age_hours": 72
+  "catalog_checkpoint_max_age_hours": 72,
+  "catalog_scan_concurrency": 2,
+  "library_download_timeout_limit": 3
 }

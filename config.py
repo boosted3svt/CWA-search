@@ -36,6 +36,8 @@ class Settings:
     catalog_cache_covers: bool = False
     catalog_library_timeout_seconds: float = 3600
     catalog_checkpoint_max_age_hours: float = 72
+    catalog_scan_concurrency: int = 2
+    library_download_timeout_limit: int = 3
 
     @classmethod
     def load(cls, filename):
@@ -62,6 +64,10 @@ class Settings:
             raise ValueError('Catalog deadline and checkpoint lifetime must be finite and positive')
         if not isinstance(settings.catalog_cache_enabled, bool) or not isinstance(settings.catalog_cache_covers, bool):
             raise ValueError('Catalog enable/cover flags must be JSON true or false')
+        if type(settings.catalog_scan_concurrency) is not int or not 1 <= settings.catalog_scan_concurrency <= 8:
+            raise ValueError('catalog_scan_concurrency must be an integer between 1 and 8')
+        if type(settings.library_download_timeout_limit) is not int or settings.library_download_timeout_limit < 0:
+            raise ValueError('library_download_timeout_limit must be a nonnegative integer (0 disables retirement)')
         return settings
 
     def library(self, line):

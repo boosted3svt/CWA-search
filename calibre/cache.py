@@ -1,10 +1,10 @@
 """Dated full snapshots, atomic active pointers, and independent daily refresh."""
 from datetime import datetime, timezone
-import hashlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
 from dataclasses import asdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
 import subprocess
 import sys
@@ -15,7 +15,8 @@ from config import Settings
 from .client import ClientError
 from .catalog import ScanCancelled
 from .models import Book
-from .state import atomic_text, state_lock, deduplicate_libraries
+from .state import atomic_text, state_lock, deduplicate_libraries, try_state_lock
+from .library_state import LibraryState, library_key, source_lock
 from .poll_worker import checkpoint_for
 
 
@@ -28,11 +29,6 @@ def is_stale(entry, hours):
     return (not last or bool(entry.get('error')) or
             (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() >= hours * 3600)
 
-
-def library_key(library):
-    # Shared defaults can change; explicit per-line selection defines identity.
-    return hashlib.sha256((library.url + '\n' +
-                           (library.library_id if library.explicit_id else '')).encode()).hexdigest()[:24]
 
 
 class CatalogStore:
@@ -106,6 +102,45 @@ class CatalogStore:
         return (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() >= hours * 3600
 
 
+def cleanup_covers(store, report=lambda message: None):
+    """Retain images referenced by any saved catalog or pending page journal."""
+    directory = store.directory / 'covers'
+    if not directory.exists():
+        return
+    keep = set()
+    with state_lock(store.index):
+        entries = list(store.manifest()['libraries'].values())
+    # Caller holds exclusive activity and lifecycle locks, so publication cannot remove these
+    # snapshots while we inspect them. Keep the index free for GUI searches.
+    for entry in entries:
+        if entry.get('snapshot'):
+            path = store.directory / entry['snapshot']
+            if path.parent.resolve() != store.directory.resolve():
+                raise ValueError('Invalid catalog snapshot path')
+            for item in json.loads(path.read_text())['books']:
+                book = Book.from_dict(item)
+                if book.cover_url:
+                    keep.add(book.key)
+    for cursor in (store.directory / 'checkpoints').glob('*/cursor.json'):
+        state = json.loads(cursor.read_text())
+        for index in range(state['page_count']):
+            for item in json.loads((cursor.parent / f'page_{index:06d}.json').read_text()):
+                book = Book.from_dict(item)
+                if book.cover_url:
+                    keep.add(book.key)
+    removed = 0
+    for path in directory.glob('*.img'):
+        if path.stem not in keep:
+            path.unlink()
+            path.with_suffix('.json').unlink(missing_ok=True)
+            removed += 1
+    for path in directory.glob('*.tmp'):
+        path.unlink(missing_ok=True)
+    if removed:
+        report(f'Removed {removed} obsolete cover files')
+
+
+
 class CatalogManager:
     def __init__(self, config):
         self.config = Path(config)
@@ -118,6 +153,7 @@ class CatalogManager:
         self.paused_until = 0
         self.events = []
         self.active = None
+        self.activities = {}
         self.logger = logging.Logger('catalog-refresh')
         self.logger.setLevel(logging.INFO)
         self.logger.addHandler(logging.StreamHandler(sys.stdout))
@@ -138,6 +174,7 @@ class CatalogManager:
         if removed:
             self.event(f'Removed {removed} duplicate library entries; original list saved as '
                        f'{Path(settings.libraries_file).name}.dedup.bak')
+        LibraryState(settings, self.event).reconcile()
 
     def status(self):
         settings = Settings.load(self.config)
@@ -152,15 +189,25 @@ class CatalogManager:
                             'error': entry.get('error'), 'cached': bool(entry.get('snapshot')),
                             'covers_error': entry.get('covers_error'),
                             'stale': is_stale(entry, settings.catalog_refresh_interval_hours)})
+        lifecycle = LibraryState(settings)
+        counters = lifecycle.load()['active']
+        for item, (_, library) in zip(entries, libraries):
+            item['download_timeout_count'] = counters.get(library_key(library), {}).get('timeout_count', 0)
         with self.lock:
             running, events = self.running, list(self.events)
-            active = dict(self.active) if self.active else None
-        if active:
-            active['elapsed_seconds'] = round(time.monotonic() - active.pop('started_monotonic'), 1)
+            activities = [dict(item) for item in self.activities.values()]
+            if self.active:
+                activities = [dict(self.active)] + [item for item in activities if item['source'] != self.active['source']]
+        for item in activities:
+            item['elapsed_seconds'] = round(time.monotonic() - item.pop('started_monotonic'), 1)
         return {'enabled': settings.catalog_cache_enabled, 'running': running, 'events': events,
                 'libraries': entries, 'interval_hours': settings.catalog_refresh_interval_hours,
-                'active': active, 'library_timeout_seconds': settings.catalog_library_timeout_seconds,
-                'covers_enabled': settings.catalog_cache_covers}
+                'active': activities[0] if activities else None, 'active_libraries': activities,
+                'concurrency': settings.catalog_scan_concurrency,
+                'library_timeout_seconds': settings.catalog_library_timeout_seconds,
+                'covers_enabled': settings.catalog_cache_covers,
+                'retired': lifecycle.load()['history'],
+                'download_timeout_limit': settings.library_download_timeout_limit}
 
     def refresh(self, force=False, covers_only=False):
         settings = Settings.load(self.config)
@@ -192,8 +239,15 @@ class CatalogManager:
     def run_worker(self, settings, library, covers_only):
         """A process boundary bounds headers, DNS, body reads, and retries alike."""
         started = time.monotonic()
+        key = library_key(library)
+        lifecycle = LibraryState(settings)
+        entry = lifecycle.load()['active'].get(key)
+        if not entry:
+            raise ScanCancelled('Library removed before its worker started')
+        generation = entry['generation']
+        next_membership_check = started
         with self.lock:
-            self.active = {'source': library.url, 'phase': 'starting', 'count': 0,
+            self.activities[key] = {'source': library.url, 'phase': 'starting', 'count': 0,
                            'started_monotonic': started, 'last_activity': now(),
                            'deadline_seconds': settings.catalog_library_timeout_seconds}
         process = subprocess.Popen([sys.executable, '-m', 'calibre.poll_worker'],
@@ -217,6 +271,10 @@ class CatalogManager:
                        'key': library_key(library), 'covers_only': covers_only}, process.stdin)
             process.stdin.close()
             while True:
+                if time.monotonic() >= next_membership_check:
+                    if not lifecycle.allowed(library, generation):
+                        raise ScanCancelled('Library removed; stopping worker before cache purge')
+                    next_membership_check = time.monotonic() + 0.5
                 if self.cancelled():
                     raise ScanCancelled('Refresh stopped; saved pages and completed covers retained for resume')
                 elapsed = time.monotonic() - started
@@ -230,15 +288,15 @@ class CatalogManager:
                 else:
                     self.event(f'{library.url}: {item["message"]}')
                     with self.lock:
-                        self.active.update({k: v for k, v in item.items()
+                        self.activities[key].update({k: v for k, v in item.items()
                                             if k not in ('message', 'error', 'success')})
-                        self.active['last_activity'] = now()
+                        self.activities[key]['last_activity'] = now()
                     success = success or item.get('success', False)
                     if item.get('error'):
                         error = item['message']
                 if time.monotonic() - heartbeat >= 30:
                     with self.lock:
-                        activity = dict(self.active)
+                        activity = dict(self.activities[key])
                     self.event(f'{library.url}: still active ({activity["phase"]}, '
                                f'{elapsed:.0f}s elapsed, deadline {settings.catalog_library_timeout_seconds:g}s)')
                     heartbeat = time.monotonic()
@@ -258,105 +316,120 @@ class CatalogManager:
             process.stdout.close()
 
     def cleanup_covers(self, store):
-        """Retain images referenced by any saved catalog or pending page journal."""
-        directory = store.directory / 'covers'
-        if not directory.exists():
-            return
-        keep = set()
-        with state_lock(store.index):
-            entries = list(store.manifest()['libraries'].values())
-        # Caller holds the refresh lock, so publication cannot remove these
-        # snapshots while we inspect them. Keep the index free for GUI searches.
-        for entry in entries:
-            if entry.get('snapshot'):
-                path = store.directory / entry['snapshot']
-                if path.parent.resolve() != store.directory.resolve():
-                    raise ValueError('Invalid catalog snapshot path')
-                for item in json.loads(path.read_text())['books']:
-                    book = Book.from_dict(item)
-                    if book.cover_url:
-                        keep.add(book.key)
-        for cursor in (store.directory / 'checkpoints').glob('*/cursor.json'):
-            state = json.loads(cursor.read_text())
-            for index in range(state['page_count']):
-                for item in json.loads((cursor.parent / f'page_{index:06d}.json').read_text()):
-                    book = Book.from_dict(item)
-                    if book.cover_url:
-                        keep.add(book.key)
-        removed = 0
-        for path in directory.glob('*.img'):
-            if path.stem not in keep:
-                path.unlink()
-                path.with_suffix('.json').unlink(missing_ok=True)
-                removed += 1
-        for path in directory.glob('*.tmp'):
-            path.unlink(missing_ok=True)
-        if removed:
-            self.event(f'Removed {removed} obsolete cover files')
+        cleanup_covers(store, self.event)
 
-    def run(self, force, covers_only=False):
+    def run_one(self, settings, library, force, covers_only):
+        lifecycle = LibraryState(settings, self.event)
+        key = library_key(library)
+        store = CatalogStore(settings.catalog_cache_dir)
+        def stopped():
+            return self.cancelled() or not lifecycle.allowed(library)
         try:
-            settings = Settings.load(self.config)
-            store = CatalogStore(settings.catalog_cache_dir)
-            for _, library in settings.libraries():
-                if self.cancelled():
-                    break
-                if covers_only and not store.entry(library).get('snapshot'):
-                    self.event(f'{library.url}: skipped cover-only refresh; no complete catalog yet')
-                    continue
-                if not force and not covers_only and not store.due(library, settings.catalog_refresh_interval_hours):
-                    continue
-                # Cross-process refresh lock prevents overlapping scans of the same
-                # store; it does not lock history or block local searches.
-                with state_lock(Path(settings.catalog_cache_dir) / 'refresh', cancelled=self.cancelled):
-                    if self.cancelled():
-                        break
+            with state_lock(lifecycle.directory / 'activity', cancelled=stopped, shared=True), \
+                    state_lock(source_lock(lifecycle.directory, library.url), cancelled=stopped, shared=True):
+                with state_lock(lifecycle.directory / 'locks' / key, cancelled=stopped):
+                    if stopped():
+                        return
+                    if covers_only and not store.entry(library).get('snapshot'):
+                        self.event(f'{library.url}: skipped cover-only refresh; no complete catalog yet')
+                        return
                     if not force and not covers_only and not store.due(library, settings.catalog_refresh_interval_hours):
-                        continue
+                        return
                     started = now()
-                    if not covers_only:
-                        store.update(library, {'last_attempt': started, 'refresh_in_progress': True})
+                    with state_lock(lifecycle.gate):
+                        if not lifecycle.allowed(library):
+                            return
+                        if not covers_only:
+                            store.update(library, {'last_attempt': started, 'refresh_in_progress': True})
                     self.event(f'{"Fetching missing covers for" if covers_only else "Refreshing"} {library.url}')
                     try:
                         self.run_worker(settings, library, covers_only)
                         if self.cancelled():
                             raise ScanCancelled('Refresh stopped; progress retained for resume')
-                        if covers_only:
-                            store.update(library, {'covers_last_success': now(), 'covers_error': None})
-                        else:
-                            checkpoint = checkpoint_for(settings, library, library_key(library))
-                            state, books = checkpoint.load()
-                            if not state or not state['complete']:
-                                raise ClientError('Worker did not save a complete catalog; old snapshot retained')
-                            with self.lock:
-                                if self.active:
-                                    self.active.update(phase='saving', last_activity=now())
-                            self.event(f'{library.url}: saving complete JSON snapshot ({len(books)} books)')
-                            covers_fields = ({'covers_last_success': now(), 'covers_error': None}
-                                             if settings.catalog_cache_covers else {})
-                            store.publish(library, list(books.values()), started, covers_fields)
-                            try:
-                                checkpoint.cursor.unlink(missing_ok=True)
-                                checkpoint.clear()
-                            except OSError:
-                                self.event(f'{library.url}: catalog saved, but old checkpoint files could not be removed')
-                            self.event(f'{library.url}: published {len(books)} books')
+                        with state_lock(lifecycle.gate):
+                            if not lifecycle.allowed(library):
+                                self.event(f'{library.url}: removed; discarding worker completion')
+                                return
+                            if covers_only:
+                                store.update(library, {'covers_last_success': now(), 'covers_error': None})
+                            else:
+                                checkpoint = checkpoint_for(settings, library, key)
+                                state, books = checkpoint.load()
+                                if not state or not state['complete']:
+                                    raise ClientError('Worker did not save a complete catalog; old snapshot retained')
+                                with self.lock:
+                                    activity = self.activities.get(key) or self.active
+                                    if activity:
+                                        activity.update(phase='saving', last_activity=now())
+                                self.event(f'{library.url}: saving complete JSON snapshot ({len(books)} books)')
+                                covers_fields = ({'covers_last_success': now(), 'covers_error': None}
+                                                 if settings.catalog_cache_covers else {})
+                                store.publish(library, list(books.values()), started, covers_fields)
+                                try:
+                                    checkpoint.cursor.unlink(missing_ok=True)
+                                    checkpoint.clear()
+                                except OSError:
+                                    self.event(f'{library.url}: catalog saved, but old checkpoint files could not be removed')
+                                self.event(f'{library.url}: published {len(books)} books')
                     except Exception as exc:
-                        fields = ({'covers_error': str(exc)} if covers_only else
-                                  {'error': str(exc), 'refresh_in_progress': isinstance(exc, ScanCancelled)})
-                        store.update(library, fields)
+                        with state_lock(lifecycle.gate):
+                            if lifecycle.allowed(library):
+                                fields = ({'covers_error': str(exc)} if covers_only else
+                                          {'error': str(exc), 'refresh_in_progress': isinstance(exc, ScanCancelled)})
+                                store.update(library, fields)
                         self.event(f'{library.url}: refresh failed; previous cache retained — {exc}')
-                    finally:
-                        with self.lock:
-                            self.active = None
-            if not self.cancelled():
-                with state_lock(Path(settings.catalog_cache_dir) / 'refresh', cancelled=self.cancelled):
-                    self.cleanup_covers(store)
+        except RuntimeError as exc:
+            if not stopped():
+                raise
+        finally:
+            with self.lock:
+                self.activities.pop(key, None)
+                self.active = None
+            lifecycle.purge_pending()
+
+    def run(self, force, covers_only=False):
+        try:
+            settings = Settings.load(self.config)
+            libraries = settings.libraries()
+            self.event(f'Starting batch with up to {settings.catalog_scan_concurrency} parallel libraries')
+            with ThreadPoolExecutor(max_workers=settings.catalog_scan_concurrency) as pool:
+                futures = [pool.submit(self.run_one, settings, library, force, covers_only)
+                           for _, library in libraries]
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        self.event(f'Library worker failed: {exc}')
+            LibraryState(settings, self.event).purge_pending()
+            self.cleanup_if_idle(settings)
         except Exception as exc:
             self.event(f'Catalog refresh could not run: {exc}')
         finally:
             with self.lock:
                 self.running = False
+
+    def cleanup_if_idle(self, settings):
+        # An exclusive activity lock excludes workers in other app instances too.
+        with try_state_lock(Path(settings.catalog_cache_dir) / 'activity') as acquired:
+            if acquired:
+                with state_lock(Path(settings.catalog_cache_dir) / 'lifecycle'):
+                    self.cleanup_covers(CatalogStore(settings.catalog_cache_dir))
+
+    def download_outcome(self, library, success=False, timed_out=False):
+        settings = Settings.load(self.config)
+        outcome = LibraryState(settings, self.event).outcome(library, success, timed_out)
+        if outcome and outcome['retired']:
+            self.cleanup_if_idle(settings)
+        return outcome
+
+    def restore(self, record_id=None, all_retired=False):
+        settings = Settings.load(self.config)
+        result = LibraryState(settings, self.event).restore(record_id, all_retired)
+        self.maintain_libraries(settings)
+        return result
+
+    def clear_retirement_history(self):
+        LibraryState(Settings.load(self.config), self.event).clear_history()
 
     def start(self):
         def schedule():
@@ -369,7 +442,9 @@ class CatalogManager:
                 except Exception as exc:
                     self.event(f'Scheduler: {exc}')
                 self.stop.wait(60)
-        self.maintain_libraries(Settings.load(self.config))
+        settings = Settings.load(self.config)
+        self.maintain_libraries(settings)
+        self.cleanup_if_idle(settings)
         self.scheduler = threading.Thread(target=schedule, daemon=True)
         self.scheduler.start()
 

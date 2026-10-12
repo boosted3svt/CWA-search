@@ -11,6 +11,7 @@ from calibre.downloader import download, SUPPORTED_FORMATS
 from calibre.matcher import matches
 from calibre.parser import FeedError
 from calibre.state import History, prune_library, state_lock, deduplicate_libraries
+from calibre.library_state import LibraryState
 
 
 def make_client(settings, library):
@@ -43,11 +44,16 @@ def acquire(book, library, settings, history, fmt=None, include_history=False):
     client = make_client(settings, library)
     try:
         path = download(client, book, acquisition, settings.download_dir, settings.max_download_bytes)
-    except (ClientError, OSError):
+    except (ClientError, OSError) as exc:
+        if isinstance(exc, LibraryTimeout):
+            lifecycle = LibraryState(settings, lambda text: print(text, file=sys.stderr))
+            lifecycle.outcome(library, timed_out=True)
+            cleanup_retired(settings)
         history.record(book, acquisition, 'failed')
         raise
     finally:
         client.close()
+    LibraryState(settings).outcome(library, success=True)
     history.record(book, acquisition, 'downloaded', path)
     print(f'Downloaded {acquisition.format.upper()}: {path}')
 
@@ -134,6 +140,15 @@ def search(args, settings, history):
         fmt = input(f'Format [{default}]: ').strip() or default
         acquire(book, library, settings, history, fmt, args.include_history)
     return 0 if successes else 1
+
+
+def cleanup_retired(settings):
+    from calibre.cache import cleanup_covers, CatalogStore
+    from calibre.state import try_state_lock
+    with try_state_lock(Path(settings.catalog_cache_dir) / 'activity') as acquired:
+        if acquired:
+            with state_lock(Path(settings.catalog_cache_dir) / 'lifecycle'):
+                cleanup_covers(CatalogStore(settings.catalog_cache_dir))
 
 
 def cli():
