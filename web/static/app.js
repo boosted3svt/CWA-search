@@ -144,7 +144,7 @@ async function loadCatalogs() {
     const phaseNames = {starting:'Connecting',metadata:'Reading books','metadata-complete':'Books read',covers:'Fetching covers','covers-complete':'Covers checked',complete:'Saving results',saving:'Saving catalog',error:'Refresh failed'};
     $('catalog-progress').replaceChildren();
     for (const active of activeLibraries) {
-      $('catalog-progress').append(node('p', `${active.source} · ${phaseNames[active.phase] || active.phase} · ${active.count || 0}${active.total !== undefined ? '/'+active.total : ''} · ${Math.round(active.elapsed_seconds)}s elapsed / ${active.deadline_seconds}s limit · Last progress: ${new Date(active.last_activity).toLocaleTimeString()}`, 'source'));
+      $('catalog-progress').append(node('p', `${active.worker_id ? '[worker '+active.worker_id+'] ' : ''}${active.source} · ${phaseNames[active.phase] || active.phase} · ${active.count || 0}${active.total !== undefined ? '/'+active.total : ''} · ${Math.round(active.elapsed_seconds)}s elapsed / ${active.deadline_seconds}s limit · Last progress: ${new Date(active.last_activity).toLocaleTimeString()}`, 'source'));
     }
     $('catalog-events').textContent = state.events.join('\n');
     $('catalog-libraries').replaceChildren();

@@ -1,5 +1,6 @@
 """Concurrency, lifecycle races, and persisted timeout accounting."""
 from dataclasses import replace
+from pathlib import Path
 import json
 import time
 import pytest
@@ -25,6 +26,11 @@ def test_parallel_pool_limit_and_independent_progress(tmp_path, concurrency):
                 status=manager.status()
                 assert len(status['active_libraries'])==2
                 assert {item['source'] for item in status['active_libraries']}=={a[0],b[0]}
+                assert {item['worker_id'] for item in status['active_libraries']}=={1,2}
+                assert any('[worker 1]' in item for item in status['events'])
+                assert any('[worker 2]' in item for item in status['events'])
+                log=(Path(manager.config).parent/'state/catalogs/refresh.log').read_text()
+                assert '[worker 1]' in log and '[worker 2]' in log
                 assert not c[3].wait(.2)
             else:
                 assert not b[3].wait(.2)

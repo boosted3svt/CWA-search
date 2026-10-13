@@ -14,6 +14,58 @@ PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4
 HEADERS = {'X-OPDS-UI': '1'}
 
 
+@pytest.mark.parametrize('failure', [BrokenPipeError, ConnectionResetError])
+@pytest.mark.parametrize('stage', ['headers', 'body'])
+def test_disconnect_during_reply_does_not_attempt_an_error_response(website, failure, stage):
+    _,service,_=website
+    server=make_server(service,port=0)
+    handler=object.__new__(server.RequestHandlerClass)
+    statuses=[]
+    handler.send_response=lambda status:statuses.append(status)
+    handler.send_header=lambda *args:None
+    def disconnected(*args):raise failure('Client disconnected')
+    handler.end_headers=disconnected if stage=='headers' else lambda:None
+    class Writer:
+        write=disconnected
+    handler.wfile=Writer()
+    try:
+        handler.reply(200,b'page')
+        assert handler.close_connection and statuses==[200]
+    finally:server.server_close()
+
+
+def test_real_browser_disconnect_is_quiet_and_server_still_responds(website, monkeypatch):
+    import socket,struct
+    from web_app import STATIC
+    _,service,_=website
+    entered,release,finished=threading.Event(),threading.Event(),threading.Event()
+    original=Path.read_bytes
+    def delayed(path):
+        if path==STATIC/'index.html':
+            entered.set();assert release.wait(3)
+        return original(path)
+    monkeypatch.setattr(Path,'read_bytes',delayed)
+    server=make_server(service,port=0)
+    errors=[]
+    server.handle_error=lambda *args:errors.append(args)
+    original_finish=server.RequestHandlerClass.finish
+    def finish_handler(handler):
+        try:original_finish(handler)
+        finally:finished.set()
+    server.RequestHandlerClass.finish=finish_handler
+    with serving(server) as url:
+        client=socket.create_connection(server.server_address,timeout=2)
+        try:
+            client.sendall(f'GET / HTTP/1.1\r\nHost: 127.0.0.1:{server.server_port}\r\n\r\n'.encode())
+            assert entered.wait(2)
+            client.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0))
+            client.close()
+        finally:client.close();release.set()
+        assert finished.wait(2)
+        assert not errors
+        assert requests.get(url+'/api/settings',timeout=3).status_code==200
+
+
 @contextmanager
 def serving(server):
     worker = threading.Thread(target=server.serve_forever, daemon=True)

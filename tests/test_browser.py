@@ -155,6 +155,7 @@ def test_browser_parallel_progress_and_retirement_controls(website,monkeypatch):
     with service.catalogs.lock:
         for index in (1,2):
             service.catalogs.activities[str(index)]={'source':f'http://fixture{index}.test','phase':'covers',
+                 'worker_id':index,
                  'count':20*index,'total':100,'started_monotonic':time.monotonic(),
                  'last_activity':now(),'deadline_seconds':3600}
     with playwright.sync_playwright() as runtime:
@@ -165,6 +166,8 @@ def test_browser_parallel_progress_and_retirement_controls(website,monkeypatch):
         page.wait_for_function('() => document.querySelectorAll("#catalog-progress p").length === 2')
         assert '20/100' in page.locator('#catalog-progress').inner_text()
         assert '40/100' in page.locator('#catalog-progress').inner_text()
+        assert '[worker 1]' in page.locator('#catalog-progress').inner_text()
+        assert '[worker 2]' in page.locator('#catalog-progress').inner_text()
         page.get_by_role('button',name='Restore server',exact=True).click()
         page.wait_for_function('() => document.querySelector("#retired-entries").textContent.includes("Restored")')
         assert settings.libraries()[0][1].url==library.url

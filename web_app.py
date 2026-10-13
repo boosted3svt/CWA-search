@@ -23,17 +23,28 @@ def make_server(service, host='127.0.0.1', port=8090, password=None, allowed_hos
         def log_message(self, *args):
             pass
 
+        def handle(self):
+            try:
+                super().handle()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                # Includes disconnects while writing authentication/parser errors.
+                self.close_connection = True
+
         def reply(self, status, body, media='application/json'):
             if not isinstance(body, bytes):
                 body = json.dumps(body).encode()
-            self.send_response(status)
-            self.send_header('Content-Type', media)
-            self.send_header('Content-Length', str(len(body)))
-            self.send_header('X-Content-Type-Options', 'nosniff')
-            self.send_header('Cache-Control', 'no-store')
-            self.send_header('Content-Security-Policy', "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header('Content-Type', media)
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Content-Security-Policy', "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                # A canceled browser request cannot receive another error reply.
+                self.close_connection = True
 
         def authorized(self):
             try:

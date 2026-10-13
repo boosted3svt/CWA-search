@@ -24,6 +24,15 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def current_worker_id():
+    name = threading.current_thread().name
+    if name.startswith('catalog-worker_'):
+        suffix = name.rsplit('_', 1)[1]
+        if suffix.isdigit():
+            return int(suffix) + 1
+    return None
+
+
 def is_stale(entry, hours):
     last = entry.get('last_success')
     return (not last or bool(entry.get('error')) or
@@ -163,7 +172,9 @@ class CatalogManager:
         self.logger.addHandler(RotatingFileHandler(log_path, maxBytes=5_000_000, backupCount=3))
 
     def event(self, message):
-        message = f'{now()} {str(message).replace(chr(10), " ").replace(chr(13), " ")}'
+        worker = current_worker_id()
+        prefix = f'[worker {worker}] ' if worker is not None else ''
+        message = f'{now()} {prefix}{str(message).replace(chr(10), " ").replace(chr(13), " ")}'
         with self.lock:
             self.events.append(message)
             self.events = self.events[-200:]
@@ -248,6 +259,7 @@ class CatalogManager:
         next_membership_check = started
         with self.lock:
             self.activities[key] = {'source': library.url, 'phase': 'starting', 'count': 0,
+                           'worker_id': current_worker_id(),
                            'started_monotonic': started, 'last_activity': now(),
                            'deadline_seconds': settings.catalog_library_timeout_seconds}
         process = subprocess.Popen([sys.executable, '-m', 'calibre.poll_worker'],
@@ -392,7 +404,7 @@ class CatalogManager:
             settings = Settings.load(self.config)
             libraries = settings.libraries()
             self.event(f'Starting batch with up to {settings.catalog_scan_concurrency} parallel libraries')
-            with ThreadPoolExecutor(max_workers=settings.catalog_scan_concurrency) as pool:
+            with ThreadPoolExecutor(max_workers=settings.catalog_scan_concurrency, thread_name_prefix='catalog-worker') as pool:
                 futures = [pool.submit(self.run_one, settings, library, force, covers_only)
                            for _, library in libraries]
                 for future in as_completed(futures):
