@@ -103,7 +103,7 @@ class CatalogStore:
 
     def due(self, library, hours):
         entry = self.entry(library)
-        if entry.get('refresh_in_progress'):
+        if entry.get('refresh_in_progress') or entry.get('covers_in_progress'):
             return True
         last = entry.get('last_attempt')
         if not last:
@@ -199,6 +199,8 @@ class CatalogManager:
                             'last_success': entry.get('last_success'), 'last_attempt': entry.get('last_attempt'),
                             'error': entry.get('error'), 'cached': bool(entry.get('snapshot')),
                             'covers_error': entry.get('covers_error'),
+                            'covers_pending': entry.get('covers_pending', False),
+                            'covers_failed': entry.get('covers_failed'),
                             'stale': is_stale(entry, settings.catalog_refresh_interval_hours)})
         lifecycle = LibraryState(settings)
         counters = lifecycle.load()['active']
@@ -260,6 +262,7 @@ class CatalogManager:
         with self.lock:
             self.activities[key] = {'source': library.url, 'phase': 'starting', 'count': 0,
                            'worker_id': current_worker_id(),
+                           'metadata_published': False,
                            'started_monotonic': started, 'last_activity': now(),
                            'deadline_seconds': settings.catalog_library_timeout_seconds}
         process = subprocess.Popen([sys.executable, '-m', 'calibre.poll_worker'],
@@ -275,7 +278,7 @@ class CatalogManager:
                     pass
         reader = threading.Thread(target=read_messages, daemon=True)
         reader.start()
-        success, error = False, None
+        success, error, cover_summary = False, None, {}
         heartbeat = started
         try:
             # Credentials are passed over stdin, never command arguments or files.
@@ -299,6 +302,12 @@ class CatalogManager:
                         break
                 else:
                     self.event(f'{library.url}: {item["message"]}')
+                    if item.get('phase') == 'metadata-complete' and not covers_only:
+                        published = self.publish_metadata(settings, library, generation)
+                        with self.lock:
+                            self.activities[key]['metadata_published'] = published
+                    if item.get('phase') == 'covers-complete':
+                        cover_summary = {name: item.get(name, 0) for name in ('total', 'failed', 'fetched', 'reused')}
                     with self.lock:
                         self.activities[key].update({k: v for k, v in item.items()
                                             if k not in ('message', 'error', 'success')})
@@ -314,6 +323,9 @@ class CatalogManager:
                     heartbeat = time.monotonic()
             if process.returncode != 0 or not success:
                 raise ClientError(error or 'Catalog worker exited before completing')
+            with self.lock:
+                published = self.activities[key]['metadata_published']
+            return {**cover_summary, 'metadata_published': published}
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -330,6 +342,33 @@ class CatalogManager:
     def cleanup_covers(self, store):
         cleanup_covers(store, self.event)
 
+    def publish_metadata(self, settings, library, generation=None):
+        """Publish a complete checkpoint independently of the cover phase."""
+        lifecycle = LibraryState(settings)
+        checkpoint = checkpoint_for(settings, library, library_key(library))
+        state, books = checkpoint.load()
+        if not state or not state.get('complete'):
+            return False
+        with state_lock(lifecycle.gate):
+            if not lifecycle.allowed(library, generation):
+                raise ScanCancelled('Library removed before catalog publication')
+            store = CatalogStore(settings.catalog_cache_dir)
+            entry = store.entry(library)
+            fields = {'metadata_checkpoint_stamp': state['saved_at'],
+                      'covers_pending': settings.catalog_cache_covers,
+                      'covers_in_progress': settings.catalog_cache_covers,
+                      'cover_job_only': False, 'covers_error': None}
+            if entry.get('metadata_checkpoint_stamp') != state['saved_at']:
+                fields.update(covers_failed=None, covers_last_success=None)
+                store.publish(library, list(books.values()), entry.get('last_attempt', now()), fields)
+                self.event(f'{library.url}: published {len(books)} books; catalog searchable now'+
+                           ('; cover fetching continues' if settings.catalog_cache_covers else ''))
+            else:
+                fields.update(error=None, refresh_in_progress=False)
+                store.update(library, fields)
+                self.event(f'{library.url}: complete catalog already published; reusing metadata')
+        return True
+
     def run_one(self, settings, library, force, covers_only):
         lifecycle = LibraryState(settings, self.event)
         key = library_key(library)
@@ -342,6 +381,9 @@ class CatalogManager:
                 with state_lock(lifecycle.directory / 'locks' / key, cancelled=stopped):
                     if stopped():
                         return
+                    entry = store.entry(library)
+                    if not force and settings.catalog_cache_covers and entry.get('covers_in_progress') and entry.get('cover_job_only'):
+                        covers_only = True
                     if covers_only and not store.entry(library).get('snapshot'):
                         self.event(f'{library.url}: skipped cover-only refresh; no complete catalog yet')
                         return
@@ -352,44 +394,64 @@ class CatalogManager:
                         if not lifecycle.allowed(library):
                             return
                         if not covers_only:
-                            store.update(library, {'last_attempt': started, 'refresh_in_progress': True})
+                            store.update(library, {'last_attempt': started, 'refresh_in_progress': True,
+                                                   'covers_in_progress': False, 'cover_job_only': False})
+                        else:
+                            store.update(library, {'covers_in_progress': True, 'covers_pending': True,
+                                                   'covers_error': None, 'cover_job_only': True})
                     self.event(f'{"Fetching missing covers for" if covers_only else "Refreshing"} {library.url}')
                     try:
-                        self.run_worker(settings, library, covers_only)
+                        summary = self.run_worker(settings, library, covers_only) or {}
                         if self.cancelled():
                             raise ScanCancelled('Refresh stopped; progress retained for resume')
+                        if not covers_only and not summary.get('metadata_published') and not self.publish_metadata(settings, library):
+                            raise ClientError('Worker did not save a complete catalog; old snapshot retained')
                         with state_lock(lifecycle.gate):
                             if not lifecycle.allowed(library):
                                 self.event(f'{library.url}: removed; discarding worker completion')
                                 return
-                            if covers_only:
-                                store.update(library, {'covers_last_success': now(), 'covers_error': None})
-                            else:
-                                checkpoint = checkpoint_for(settings, library, key)
-                                state, books = checkpoint.load()
-                                if not state or not state['complete']:
-                                    raise ClientError('Worker did not save a complete catalog; old snapshot retained')
-                                with self.lock:
-                                    activity = self.activities.get(key) or self.active
-                                    if activity:
-                                        activity.update(phase='saving', last_activity=now())
-                                self.event(f'{library.url}: saving complete JSON snapshot ({len(books)} books)')
-                                covers_fields = ({'covers_last_success': now(), 'covers_error': None}
-                                                 if settings.catalog_cache_covers else {})
-                                store.publish(library, list(books.values()), started, covers_fields)
+                            fields = {'covers_pending': False, 'covers_in_progress': False,
+                                      'covers_error': None}
+                            if not covers_only:
+                                fields['refresh_in_progress'] = False
+                            if covers_only or settings.catalog_cache_covers:
+                                fields.update(covers_last_success=now(), covers_failed=summary.get('failed', 0),
+                                              covers_checked=summary.get('total', 0))
+                            store.update(library, fields)
+                            checkpoint = checkpoint_for(settings, library, key)
+                            clear_checkpoint = not covers_only
+                            if covers_only and checkpoint.cursor.exists():
+                                cursor = json.loads(checkpoint.cursor.read_text())
+                                clear_checkpoint = (cursor.get('complete') and
+                                    cursor.get('saved_at') == store.entry(library).get('metadata_checkpoint_stamp'))
+                            if clear_checkpoint:
                                 try:
                                     checkpoint.cursor.unlink(missing_ok=True)
                                     checkpoint.clear()
                                 except OSError:
                                     self.event(f'{library.url}: catalog saved, but old checkpoint files could not be removed')
-                                self.event(f'{library.url}: published {len(books)} books')
                     except Exception as exc:
+                        with self.lock:
+                            published = covers_only or self.activities.get(key, {}).get('metadata_published', False)
+                        if not published:
+                            try:
+                                # A deadline can race delivery of the metadata-complete event.
+                                published = self.publish_metadata(settings, library)
+                            except Exception:
+                                pass
                         with state_lock(lifecycle.gate):
-                            if lifecycle.allowed(library):
-                                fields = ({'covers_error': str(exc)} if covers_only else
+                            present = lifecycle.allowed(library)
+                            if present:
+                                fields = ({'covers_error': str(exc), 'covers_pending': True,
+                                           'covers_in_progress': isinstance(exc, ScanCancelled)} if published else
                                           {'error': str(exc), 'refresh_in_progress': isinstance(exc, ScanCancelled)})
+                                if published and not covers_only:
+                                    fields['refresh_in_progress'] = False
                                 store.update(library, fields)
-                        self.event(f'{library.url}: refresh failed; previous cache retained — {exc}')
+                        message = ('library removed; worker stopped for cache cleanup — ' if not present else
+                                   'cover phase interrupted; complete catalog remains searchable — ' if published else
+                                   'refresh failed; previous cache retained — ')
+                        self.event(f'{library.url}: '+message+str(exc))
         except RuntimeError as exc:
             if not stopped():
                 raise

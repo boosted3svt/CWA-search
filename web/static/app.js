@@ -4,6 +4,9 @@ let busy = false;
 let currentJob = null;
 let lastSearch = null;
 let failedSelection = null;
+let coverPollOffset = 0;
+let coverPollGrace = 0;
+let coverPollBusy = false;
 function notice(message, error = false) { $('notice').textContent = message; $('notice').className = error ? 'error' : ''; }
 function setBusy(value) { busy = value; document.querySelectorAll('button').forEach(button => { if (!['refresh-catalogs','refresh-covers','stop-catalogs','restore-all-retired','clear-retired','restore-retired'].includes(button.id)) button.disabled = value; }); }
 async function api(path, data) {
@@ -58,13 +61,25 @@ async function followJob(job, action, includeHistory) {
 }
 function node(tag, text, className) { const element = document.createElement(tag); element.textContent = text; if (className) element.className = className; return element; }
 function showResults(books, includeHistory) {
+  coverPollOffset = 0;
   $('results').replaceChildren(); $('result-heading').textContent = books.length ? `${books.length} matching ${books.length === 1 ? 'book' : 'books'}` : 'No eligible matches';
   for (const book of books) {
     const card = node('article', '', 'book'); card.dataset.bookId = book.key;
-    const fallback = node('div', 'No cover available', 'cover placeholder');
-    if (book.cover_url) {
-      const image = document.createElement('img'); image.className = 'cover'; image.src = book.cover_url; image.alt = `Cover of ${book.title}`; image.loading = 'lazy'; image.addEventListener('error', () => image.replaceWith(fallback)); card.append(image);
-    } else card.append(fallback);
+    const placeholder = '/placeholder-cover.svg';
+    const image = document.createElement('img'); image.className = 'cover'; image.src = book.cover_url || placeholder;
+    image.alt = book.cover_url && book.cover_url !== placeholder ? `Cover of ${book.title}` : `Cover unavailable for ${book.title}`;
+    image.loading = 'lazy';
+    image.dataset.bookId = book.key;
+    image.dataset.coverTitle = book.title;
+    if (book.cover_check_url) image.dataset.coverCandidate = book.cover_check_url;
+    if (image.getAttribute('src') === placeholder && book.cover_check_url) image.dataset.coverWaiting = 'true';
+    image.addEventListener('error', () => {
+      if (image.getAttribute('src') !== placeholder) {
+        image.src = placeholder; image.alt = `Cover unavailable for ${book.title}`;
+        if (book.cover_check_url) image.dataset.coverWaiting = 'true';
+      }
+    });
+    card.append(image);
     const details = node('div', ''); const badge = node('p', '', 'download-status'); badge.hidden = true; details.append(badge); details.append(node('h3', book.title), node('p', book.authors.join(', ') || 'Unknown author'));
     details.append(node('p', `${book.source} · ${book.library_id || 'Default library'}`, 'source'));
     if (book.cached_at) details.append(node('p', `Catalog refreshed: ${new Date(book.cached_at).toLocaleString()}${book.cache_refresh_error ? ' · Latest refresh failed; older data retained' : (book.cache_stale ? ' · Older cached data' : '')}`, 'source'));
@@ -134,6 +149,11 @@ async function loadCatalogs() {
     renderRetired(state);
     $('catalog-panel').hidden = !state.enabled;
     if (!state.enabled) return;
+    if (state.running) coverPollGrace = Math.ceil(document.querySelectorAll('img[data-cover-waiting="true"]').length / 100);
+    if (state.running || coverPollGrace > 0) {
+      await refreshCoverImages();
+      if (!state.running) coverPollGrace--;
+    }
     const cached = state.libraries.filter(library => library.cached).length;
     const count = state.libraries.reduce((total, library) => total + library.book_count, 0);
     $('catalog-summary').textContent = `${state.running ? 'Refresh running. ' : ''}${count.toLocaleString()} cached books across ${cached}/${state.libraries.length} libraries. Refresh interval: ${state.interval_hours} hours. Parallel libraries: ${state.concurrency}. Searches use local metadata; downloads connect to the source server.`;
@@ -141,7 +161,7 @@ async function loadCatalogs() {
     $('refresh-covers').disabled = state.running || !state.covers_enabled;
     $('stop-catalogs').hidden = !state.running;
     const activeLibraries = state.active_libraries || (state.active ? [state.active] : []);
-    const phaseNames = {starting:'Connecting',metadata:'Reading books','metadata-complete':'Books read',covers:'Fetching covers','covers-complete':'Covers checked',complete:'Saving results',saving:'Saving catalog',error:'Refresh failed'};
+    const phaseNames = {starting:'Connecting',metadata:'Reading books','metadata-complete':'Catalog ready',covers:'Fetching covers','covers-complete':'Cover attempts complete',complete:'Finished',saving:'Saving catalog',error:'Refresh failed'};
     $('catalog-progress').replaceChildren();
     for (const active of activeLibraries) {
       $('catalog-progress').append(node('p', `${active.worker_id ? '[worker '+active.worker_id+'] ' : ''}${active.source} · ${phaseNames[active.phase] || active.phase} · ${active.count || 0}${active.total !== undefined ? '/'+active.total : ''} · ${Math.round(active.elapsed_seconds)}s elapsed / ${active.deadline_seconds}s limit · Last progress: ${new Date(active.last_activity).toLocaleTimeString()}`, 'source'));
@@ -150,7 +170,7 @@ async function loadCatalogs() {
     $('catalog-libraries').replaceChildren();
     for (const library of state.libraries) {
       const date = library.last_success ? new Date(library.last_success).toLocaleString() : 'not yet cached';
-      $('catalog-libraries').append(node('p', `${library.source} · ${library.book_count.toLocaleString()} books · ${date} · Download timeouts: ${library.download_timeout_count || 0}${library.error ? ' · Refresh failed: '+library.error : (library.stale && library.cached ? ' · Older cached data' : '')}${library.covers_error ? ' · Cover refresh failed: '+library.covers_error : ''}`, 'source'));
+      $('catalog-libraries').append(node('p', `${library.source} · ${library.book_count.toLocaleString()} books · ${date} · Download timeouts: ${library.download_timeout_count || 0}${library.error ? ' · Refresh failed: '+library.error : (library.stale && library.cached ? ' · Older cached data' : '')}${library.covers_pending ? ' · Cover fetching pending; catalog searchable' : ''}${library.covers_error ? ' · Cover refresh failed: '+library.covers_error : ''}${library.covers_failed ? ' · '+library.covers_failed+' covers unavailable' : ''}`, 'source'));
     }
   } catch (error) { /* Foreground actions report connection failures separately. */ }
 }
@@ -167,6 +187,26 @@ $('refresh-covers').addEventListener('click', async () => {
   catch (error) { notice(error.message, true); }
 });
 loadCatalogs(); setInterval(loadCatalogs, 5000);
+
+async function refreshCoverImages() {
+  if (coverPollBusy) return;
+  const pending = Array.from(document.querySelectorAll('img[data-cover-waiting="true"]'));
+  if (!pending.length) return;
+  if (coverPollOffset >= pending.length) coverPollOffset = 0;
+  const selected = pending.slice(coverPollOffset, coverPollOffset + 100);
+  coverPollOffset = (coverPollOffset + 100) % pending.length;
+  coverPollBusy = true;
+  try {
+    const available = await api('/api/cover-availability', {ids:selected.map(img => img.dataset.bookId)});
+    for (const img of selected) {
+      if (img.isConnected && available[img.dataset.bookId]) {
+        img.src = img.dataset.coverCandidate;
+        img.alt = `Cover of ${img.dataset.coverTitle}`;
+        delete img.dataset.coverWaiting;
+      }
+    }
+  } finally { coverPollBusy = false; }
+}
 
 function renderRetired(state) {
   const entries = state.retired || [];

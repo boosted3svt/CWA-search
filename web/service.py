@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
+import re
 import threading
 import uuid
 from config import Settings
@@ -13,6 +14,13 @@ from calibre.cache import CatalogManager, CatalogStore, is_stale
 from calibre.images import fetch_image, image_type
 from calibre.downloader import download, SUPPORTED_FORMATS
 from main import make_client, choose_format, result_library
+
+
+PLACEHOLDER_URL = '/placeholder-cover.svg'
+
+
+def placeholder_cover():
+    return (Path(__file__).parent / 'static' / 'placeholder-cover.svg').read_bytes(), 'image/svg+xml'
 
 
 class BusyError(ValueError):
@@ -220,8 +228,9 @@ class Service:
             item.pop('acquisitions', None)
             cover = Path(settings.catalog_cache_dir) / 'covers' / (book.key + '.img')
             item['cover_url'] = (f'/api/cover/{book.key}' if book.cover_url and
-                                 (not settings.catalog_cache_enabled or cover.exists()) else None)
+                                 (not settings.catalog_cache_enabled or cover.exists()) else PLACEHOLDER_URL)
             if settings.catalog_cache_enabled:
+                item['cover_check_url'] = f'/api/cover/{book.key}' if book.cover_url else None
                 item['cached_at'] = cache_dates[book.key].get('last_success')
                 item['cache_refresh_error'] = cache_dates[book.key].get('error')
                 item['cache_stale'] = is_stale(cache_dates[book.key], settings.catalog_refresh_interval_hours)
@@ -260,14 +269,39 @@ class Service:
         # History updates use atomic replacement, so an unlocked read is consistent.
         book = History(settings.history_file).book(key)
         if not book.cover_url:
-            raise ValueError('No cover available')
+            return placeholder_cover()
         if settings.catalog_cache_enabled:
             path = Path(settings.catalog_cache_dir) / 'covers' / (book.key + '.img')
-            body = path.read_bytes()
-            return body, image_type(body)
+            try:
+                body = path.read_bytes()
+                return body, image_type(body)
+            except (OSError, ClientError):
+                return placeholder_cover()
         client = make_client(settings, result_library(book, settings.libraries()))
         with self.cover_slots:
             try:
                 return fetch_image(client, book.cover_url)
             finally:
                 client.close()
+
+    def cover_availability(self, keys):
+        if (not isinstance(keys, list) or len(keys) > 100 or
+                any(not isinstance(key, str) or not re.fullmatch(r'[0-9a-f]{24}', key) for key in keys)):
+            raise ValueError('Expected up to 100 result IDs')
+        settings = Settings.load(self.config)
+        if not settings.catalog_cache_enabled:
+            return {}
+        books = History(settings.history_file).data['books']
+        available = {}
+        for key in set(keys):
+            if key not in books:
+                continue
+            path = Path(settings.catalog_cache_dir) / 'covers' / (key + '.img')
+            try:
+                if path.stat().st_size > 2_000_000:
+                    continue
+                image_type(path.read_bytes())
+                available[key] = f'/api/cover/{key}'
+            except (OSError, ClientError):
+                pass
+        return available

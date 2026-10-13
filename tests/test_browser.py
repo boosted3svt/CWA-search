@@ -100,7 +100,9 @@ def test_browser_cached_results_show_freshness(website,book):
         page.get_by_role('button',name='Search libraries',exact=True).click()
         page.get_by_role('heading',name='1 matching book',exact=True).wait_for()
         assert 'Catalog refreshed:' in page.locator('.book').inner_text()
-        assert page.locator('.book img').count()==0
+        image=page.locator('.book img')
+        assert image.count()==1 and image.get_attribute('src')=='/placeholder-cover.svg'
+        page.wait_for_function('() => document.querySelector(".book img").naturalWidth > 0')
         browser.close()
 
 
@@ -177,3 +179,38 @@ def test_browser_parallel_progress_and_retirement_controls(website,monkeypatch):
         assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
         browser.close()
     with service.catalogs.lock:service.catalogs.activities.clear()
+
+
+def test_browser_shared_placeholder_updates_when_a_cached_cover_arrives(website,book,monkeypatch):
+    import json
+    from pathlib import Path
+    from dataclasses import replace
+    from calibre.cache import CatalogStore,now
+    from config import Settings
+    from test_web import PNG
+    playwright=pytest.importorskip('playwright.sync_api')
+    url,service,directory=website
+    config=json.loads(service.config.read_text());config['catalog_cache_enabled']=True
+    service.config.write_text(json.dumps(config))
+    settings=Settings.load(service.config);library=settings.libraries()[0][1]
+    cached=replace(book,source=library.url)
+    CatalogStore(settings.catalog_cache_dir).publish(library,[cached],now())
+    def no_network(*args,**kwargs):raise AssertionError('Placeholder updates must stay local')
+    monkeypatch.setattr('web.service.make_client',no_network)
+    with playwright.sync_playwright() as runtime:
+        browser=runtime.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+        page=browser.new_page()
+        page.goto(url)
+        page.get_by_label('Author',exact=True).fill('Emily Rath')
+        page.get_by_role('button',name='Search libraries',exact=True).click()
+        page.get_by_role('heading',name='1 matching book',exact=True).wait_for()
+        assert page.locator('.book img').get_attribute('src')=='/placeholder-cover.svg'
+        covers=Path(settings.catalog_cache_dir)/'covers';covers.mkdir()
+        (covers/(cached.key+'.img')).write_bytes(PNG)
+        with service.catalogs.lock:service.catalogs.running=True
+        try:
+            page.wait_for_function('() => document.querySelector(".book img").naturalWidth === 1')
+            assert page.locator('.book img').get_attribute('src')==f'/api/cover/{cached.key}'
+        finally:
+            with service.catalogs.lock:service.catalogs.running=False
+            browser.close()

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="180" height="260" viewBox="0 0 180 260">
+  <rect width="180" height="260" rx="8" fill="#edf0e8"/>
+  <path d="M48 68h74a10 10 0 0 1 10 10v104H57a9 9 0 0 1-9-9V68zm0 94h84M60 68v94" fill="none" stroke="#718574" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M77 98h36m-36 14h36m-36 14h25" stroke="#718574" stroke-width="3" stroke-linecap="round"/>
+  <text x="90" y="215" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#536957">Cover unavailable</text>
+</svg>

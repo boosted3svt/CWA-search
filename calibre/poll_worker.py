@@ -93,8 +93,9 @@ def run_library(settings, library, key, covers_only=False, report=emit):
                            phase='covers', count=index, total=total, fetched=fetched, reused=reused, failed=failed)
                     last_report = time.monotonic()
             report(f'Covers complete: {fetched} fetched, {reused} reused, {failed} unavailable',
-                   phase='covers-complete', count=total, total=total, failed=failed)
-        report('Worker finished; saving complete results', phase='complete', success=True)
+                   phase='covers-complete', count=total, total=total, failed=failed,
+                   fetched=fetched, reused=reused)
+        report('Worker finished', phase='complete', success=True)
     finally:
         client.close()
 

@@ -30,7 +30,7 @@ def make_server(service, host='127.0.0.1', port=8090, password=None, allowed_hos
                 # Includes disconnects while writing authentication/parser errors.
                 self.close_connection = True
 
-        def reply(self, status, body, media='application/json'):
+        def reply(self, status, body, media='application/json', cache_control='no-store'):
             if not isinstance(body, bytes):
                 body = json.dumps(body).encode()
             try:
@@ -38,7 +38,7 @@ def make_server(service, host='127.0.0.1', port=8090, password=None, allowed_hos
                 self.send_header('Content-Type', media)
                 self.send_header('Content-Length', str(len(body)))
                 self.send_header('X-Content-Type-Options', 'nosniff')
-                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Cache-Control', cache_control)
                 self.send_header('Content-Security-Policy', "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
                 self.end_headers()
                 self.wfile.write(body)
@@ -80,7 +80,10 @@ def make_server(service, host='127.0.0.1', port=8090, password=None, allowed_hos
                 assets = {'/': ('index.html', 'text/html; charset=utf-8'),
                           '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
                           '/style.css': ('style.css', 'text/css; charset=utf-8')}
-                if path in assets:
+                if path == '/placeholder-cover.svg':
+                    self.reply(200, (STATIC / 'placeholder-cover.svg').read_bytes(), 'image/svg+xml',
+                               cache_control='public, max-age=86400')
+                elif path in assets:
                     name, media = assets[path]
                     self.reply(200, (STATIC / name).read_bytes(), media)
                 elif path == '/api/settings':
@@ -118,6 +121,8 @@ def make_server(service, host='127.0.0.1', port=8090, password=None, allowed_hos
                 path = urlsplit(self.path).path
                 if path == '/api/settings':
                     self.reply(200, service.save_folder(data.get('download_dir')))
+                elif path == '/api/cover-availability':
+                    self.reply(200, service.cover_availability(data.get('ids')))
                 elif path == '/api/catalogs/refresh':
                     started = service.catalogs.refresh(force=True)
                     self.reply(202 if started else 409, {'started': started, 'error': 'Refresh already running'} if not started else {'started': True})

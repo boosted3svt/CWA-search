@@ -47,6 +47,8 @@ def library_server():
                 body = (root+'<id>calibre-all:title</id>'+
                         ('' if state['removed'] else self.entry('last'))+'</feed>').encode()
             elif route.startswith('/cover/'):
+                if state.get('cover_missing'):
+                    self.send_error(404);return
                 if state['stall_cover']:
                     entered.set();release.wait(10)
                 body = PNG
@@ -79,7 +81,7 @@ def configure(tmp_path, urls, **options):
     return path
 
 
-def finish(manager, timeout=8):
+def finish(manager, timeout=20):
     manager.worker.join(timeout)
     assert not manager.worker.is_alive(), manager.status()
 
@@ -161,13 +163,96 @@ def test_cancel_covers_preserves_complete_pages_and_resumes_without_catalog_fetc
         manager=CatalogManager(config)
         try:
             manager.refresh(force=True);assert entered.wait(4)
-            active=manager.status()['active']
+            for _ in range(50):
+                active=manager.status()['active']
+                if active and active['phase']=='covers':break
+                time.sleep(.02)
             assert active['phase']=='covers' and active['total']==2
+            store=CatalogStore(Settings.load(config).catalog_cache_dir)
+            for _ in range(40):
+                if store.entry(Library(url)).get('snapshot'):break
+                time.sleep(.025)
+            before=store.entry(Library(url))
+            assert before['book_count']==2 and before['covers_pending']
             manager.cancel();finish(manager,3)
+            assert store.entry(Library(url))['snapshot']==before['snapshot']
+            assert not store.entry(Library(url))['error']
             state['stall_cover']=False;release.set()
             manager.refresh(force=True);finish(manager)
             assert calls['/all?offset=0']==calls['/all?offset=30']==1
             assert len(list((tmp_path/'state/catalogs/covers').glob('*.img')))==2
+            after=store.entry(Library(url))
+            assert after['snapshot']==before['snapshot'] and not after['covers_pending']
+        finally:manager.close()
+
+
+def test_first_catalog_is_searchable_during_cover_fetch_and_cover_deadline(tmp_path):
+    from web.service import Service
+    with library_server() as fixture:
+        url,state,calls,entered,release=fixture
+        state['stall_cover']=True
+        config=configure(tmp_path,[url],catalog_cache_covers=True,catalog_library_timeout_seconds=4)
+        manager=CatalogManager(config);service=Service(config)
+        store=CatalogStore(Settings.load(config).catalog_cache_dir)
+        try:
+            manager.refresh(force=True);assert entered.wait(4)
+            for _ in range(50):
+                if store.entry(Library(url)).get('snapshot'):break
+                time.sleep(.02)
+            before=store.entry(Library(url))
+            assert before['book_count']==2
+            key=service.submit('search',{'author':'Fixture Author'})
+            for _ in range(100):
+                job=service.snapshot(key)
+                if job['status']!='running':break
+                time.sleep(.01)
+            assert job['status']=='done' and len(job['results'])==2
+            assert all(book['cover_url']=='/placeholder-cover.svg' for book in job['results'])
+            finish(manager)
+            after=store.entry(Library(url))
+            assert after['snapshot']==before['snapshot'] and after['error'] is None
+            assert after['covers_pending'] and 'deadline' in after['covers_error']
+            assert not store.due(Library(url),24)
+            state['stall_cover']=False;release.set()
+            manager.refresh(force=True);finish(manager)
+            assert calls['/all?offset=0']==calls['/all?offset=30']==1
+            assert store.entry(Library(url))['snapshot']==before['snapshot']
+        finally:
+            manager.close();service.executor.shutdown(wait=True);service.catalogs.close()
+
+
+def test_unavailable_covers_do_not_invalidate_complete_catalog(tmp_path):
+    with library_server() as fixture:
+        url,state,_,_,_=fixture;state['cover_missing']=True
+        config=configure(tmp_path,[url],catalog_cache_covers=True)
+        manager=CatalogManager(config)
+        try:
+            manager.refresh(force=True);finish(manager)
+            entry=CatalogStore(Settings.load(config).catalog_cache_dir).entry(Library(url))
+            assert entry['book_count']==2 and entry['error'] is None and entry['covers_error'] is None
+            assert entry['covers_failed']==2 and not entry['covers_pending']
+            assert any('catalog searchable now' in item for item in manager.events)
+        finally:manager.close()
+
+
+def test_cover_only_completion_clears_consumed_metadata_checkpoint(tmp_path):
+    with library_server() as fixture:
+        url,state,calls,entered,release=fixture;state['stall_cover']=True
+        config=configure(tmp_path,[url],catalog_cache_covers=True)
+        manager=CatalogManager(config);store=CatalogStore(Settings.load(config).catalog_cache_dir)
+        try:
+            manager.refresh(force=True);assert entered.wait(6)
+            for _ in range(50):
+                if store.entry(Library(url)).get('snapshot'):break
+                time.sleep(.02)
+            before=store.entry(Library(url));assert before.get('snapshot')
+            manager.cancel();finish(manager,4)
+            state['stall_cover']=False;release.set()
+            manager.refresh(force=True,covers_only=True);finish(manager)
+            assert store.entry(Library(url))['snapshot']==before['snapshot']
+            assert not (store.directory/'checkpoints'/library_key(Library(url))).exists()
+            manager.refresh(force=True);finish(manager)
+            assert calls['/all?offset=0']==calls['/all?offset=30']==2
         finally:manager.close()
 
 

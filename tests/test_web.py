@@ -328,11 +328,38 @@ def test_cached_search_uses_no_live_library_and_download_still_does(website, mon
     monkeypatch.setattr('web.service.make_client',tracked)
     result = search(url)
     assert calls == [] and result['cached_at']
-    assert result['cover_url'] is None  # No live thumbnail fetch in cached mode.
+    assert result['cover_url'] == '/placeholder-cover.svg'  # No live thumbnail fetch in cached mode.
     response = post(url,'/api/download',{'id':result['key'],'format':'mobi'})
     state = wait_job(url,response.json()['id'])
     assert state['status'] == 'done' and calls == ['network-client']
     assert next((directory/'downloads').glob('*.mobi')).read_bytes() == mobi
+
+
+def test_all_missing_covers_use_one_shared_cached_placeholder(website,monkeypatch,book):
+    from dataclasses import replace
+    from calibre.cache import CatalogStore,now
+    from config import Settings
+    url,service,directory=website
+    data=json.loads(service.config.read_text());data['catalog_cache_enabled']=True
+    service.config.write_text(json.dumps(data))
+    with (directory/'libraries.txt').open('a') as handle:handle.write('http://second.test:8080\n')
+    settings=Settings.load(service.config);store=CatalogStore(settings.catalog_cache_dir)
+    for _,library in settings.libraries():
+        store.publish(library,[replace(book,source=library.url,cover_url=None)],now())
+    def no_network(*args,**kwargs):raise AssertionError('Cached search must not fetch remote covers')
+    monkeypatch.setattr('web.service.make_client',no_network)
+    job=wait_job(url,post(url,'/api/search',{'author':'Emily Rath','all_libraries':True}).json()['id'])
+    assert len(job['results'])==2 and {book['cover_url'] for book in job['results']}=={'/placeholder-cover.svg'}
+    placeholder=requests.get(url+'/placeholder-cover.svg',timeout=3)
+    assert placeholder.status_code==200 and placeholder.headers['Content-Type']=='image/svg+xml'
+    assert 'max-age=86400' in placeholder.headers['Cache-Control']
+    assert not list(store.directory.glob('covers/*.img'))
+    keys=[book['key'] for book in job['results']]
+    assert post(url,'/api/cover-availability',{'ids':keys}).json()=={}
+    (store.directory/'covers').mkdir()
+    (store.directory/'covers'/(keys[0]+'.img')).write_bytes(PNG)
+    assert post(url,'/api/cover-availability',{'ids':keys}).json()=={keys[0]:f'/api/cover/{keys[0]}'}
+    assert post(url,'/api/cover-availability',{'ids':['../../config.json']}).status_code==400
 
 
 def test_refresh_api_publishes_full_catalog_while_local_search_remains_available(website, monkeypatch, book):
