@@ -25,18 +25,21 @@ def atom_root(xml):
         root = ET.fromstring(xml)
     except ParseError as exc:
         # Calibre can emit invalid '--' inside comments copied from descriptions.
-        # Comments carry no catalog metadata. Preserve CDATA and valid comments;
-        # retry only after removing complete, malformed comments. The retry uses
+        # Word's xml:namespace processing fragments can also leak from HTML.
+        # These artifacts carry no catalog metadata. Preserve CDATA and valid comments;
+        # retry only after removing complete malformed comments or Word fragments. The retry uses
         # the same hardened parser and never repairs tags, entities, or DTDs.
         raw = xml.encode('utf-8') if isinstance(xml, str) else xml
         def clean(match):
             token = match.group(0)
+            if token.startswith(b'<?xml:namespace'):
+                return b''
             if token.startswith(b'<!--'):
                 body = token[4:-3]
                 if b'--' in body or body.endswith(b'-'):
                     return b''
             return token
-        repaired = re.sub(rb'<!\[CDATA\[.*?\]\]>|<!--.*?-->', clean, raw, flags=re.DOTALL)
+        repaired = re.sub(rb'<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?xml:namespace\s+[^<>]*?\?+>', clean, raw, flags=re.DOTALL)
         if repaired == raw:
             raise FeedError('Invalid or unsafe OPDS XML') from exc
         try:

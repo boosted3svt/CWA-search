@@ -24,7 +24,7 @@ def safe_url(url):
 
 
 def diagnose(settings, library, seconds=3600, pages=10000):
-    result = {'source': safe_url(library.url), 'requests': [], 'comment_recoveries': [],
+    result = {'source': safe_url(library.url), 'requests': [], 'xml_recoveries': [],
               'books_read': 0, 'outcome': None,
               'limits': {'seconds': seconds, 'pages': pages}}
     started = time.monotonic()
@@ -68,7 +68,7 @@ def diagnose(settings, library, seconds=3600, pages=10000):
         try:
             ET.fromstring(data)
         except Exception:
-            result['comment_recoveries'].append(dict(last_page))
+            result['xml_recoveries'].append(dict(last_page))
         return data, final_url
 
     def progress(count):

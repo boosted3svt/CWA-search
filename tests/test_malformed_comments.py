@@ -39,3 +39,22 @@ def test_entity_declarations_still_rejected():
     xml=b'<!DOCTYPE feed [<!ENTITY secret "expanded">]>'+feed('<p>&secret;</p><!--bad -- comment-->')
     with pytest.raises(FeedError):
         atom_root(xml)
+
+@pytest.mark.parametrize('end', ['?>', '/??>'])
+def test_office_namespace_fragment_does_not_drop_description_or_book(end):
+    artifact = '<?xml:namespace prefix = o ns = "urn:schemas-microsoft-com:office:office" '+end
+    xml=feed('<p>'+artifact+'Visible description.</p>')
+    books,_=parse_feed(xml,'http://example.test/opds/all','http://example.test','Library')
+    assert len(books)==1 and 'Visible description.' in books[0].description
+    assert books[0].title=='Example Book'
+
+
+def test_office_fragment_in_cdata_is_preserved():
+    literal='<?xml:namespace prefix = o ns = "office" /??>'
+    root=atom_root(feed('<p><![CDATA['+literal+']]></p><!--bad -- comment-->'))
+    assert literal in ''.join(root.itertext())
+
+
+def test_unrelated_invalid_processing_instruction_is_not_repaired():
+    with pytest.raises(FeedError):
+        atom_root(feed('<p><?other:namespace invalid /??></p><!--bad -- comment-->'))
