@@ -18,6 +18,7 @@ class Settings:
     auto_discover: bool = True
     opds_path: str = '/opds'
     preferred_formats: tuple = ('mobi', 'epub', 'azw3', 'azw', 'pdf')
+    verify_tls: bool = True
     timeout: float = 10
     retries: int = 1
     max_pages: int = 10
@@ -48,6 +49,8 @@ class Settings:
         for name in ('libraries_file', 'download_dir', 'history_file', 'catalog_cache_dir'):
             value = Path(getattr(settings, name)).expanduser()
             setattr(settings, name, str(value if value.is_absolute() else path.parent / value))
+        if type(settings.verify_tls) is not bool:
+            raise ValueError('verify_tls must be JSON true or false')
         if settings.timeout <= 0 or not 0 <= settings.retries <= 5:
             raise ValueError('timeout must be positive; retries must be between 0 and 5')
         if min(settings.max_pages, settings.max_results, settings.max_download_bytes) < 1:
@@ -87,7 +90,7 @@ class Settings:
         return Library(url, query.get('library_id', [self.library_id])[0],
                        self.search_path, list(self.allowed_hosts),
                        os.environ.get(self.username_env) or None, os.environ.get(self.password_env) or None,
-                       explicit_id='library_id' in query)
+                       explicit_id='library_id' in query, verify_tls=self.verify_tls)
 
     def libraries(self):
         path = Path(self.libraries_file)

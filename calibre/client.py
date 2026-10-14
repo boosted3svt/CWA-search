@@ -91,6 +91,7 @@ class Library:
     username: str | None = None
     password: str | None = field(default=None, repr=False)
     explicit_id: bool = False
+    verify_tls: bool = True
 
 
 class Client:
@@ -130,6 +131,7 @@ class Client:
                 try:
                     response = self.session.get(url, timeout=self.timeout, stream=True,
                                                 allow_redirects=False, auth=auth,
+                                                verify=self.library.verify_tls if origin(url) == self.base_origin else True,
                                                 proxies=requests.utils.get_environ_proxies(url),
                                                 headers={'Accept-Encoding': 'identity'})
                 except requests.Timeout as exc:

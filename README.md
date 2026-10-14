@@ -83,6 +83,8 @@ In `config.json`, change these existing settings:
 | `catalog_scan_concurrency` | `3` | Scan up to three libraries at once |
 | `catalog_refresh_interval_hours` | `24` | Refresh interval for each library |
 
+To accept self-signed or otherwise unverified HTTPS certificates for every configured library, add `"verify_tls": false` to `config.json`. Verification defaults to `true`. HTTPS stays encrypted, but with verification disabled the server identity is not checked. HTTP entries remain HTTP; use an `https://` address for an HTTPS library.
+
 Keep the file valid JSON. Configuration edits apply to subsequent operations; restart the container to apply them consistently. Library-list edits are picked up automatically, normally within a minute.
 
 ### 4. Start and open the app
