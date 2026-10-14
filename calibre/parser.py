@@ -2,6 +2,7 @@
 from urllib.parse import urljoin, urlsplit, parse_qs
 import re
 from defusedxml import ElementTree as ET
+from xml.etree.ElementTree import ParseError
 from .models import Acquisition, Book
 
 ATOM = '{http://www.w3.org/2005/Atom}'
@@ -22,6 +23,26 @@ class FeedError(ValueError):
 def atom_root(xml):
     try:
         root = ET.fromstring(xml)
+    except ParseError as exc:
+        # Calibre can emit invalid '--' inside comments copied from descriptions.
+        # Comments carry no catalog metadata. Preserve CDATA and valid comments;
+        # retry only after removing complete, malformed comments. The retry uses
+        # the same hardened parser and never repairs tags, entities, or DTDs.
+        raw = xml.encode('utf-8') if isinstance(xml, str) else xml
+        def clean(match):
+            token = match.group(0)
+            if token.startswith(b'<!--'):
+                body = token[4:-3]
+                if b'--' in body or body.endswith(b'-'):
+                    return b''
+            return token
+        repaired = re.sub(rb'<!\[CDATA\[.*?\]\]>|<!--.*?-->', clean, raw, flags=re.DOTALL)
+        if repaired == raw:
+            raise FeedError('Invalid or unsafe OPDS XML') from exc
+        try:
+            root = ET.fromstring(repaired)
+        except Exception as retry_exc:
+            raise FeedError('Invalid or unsafe OPDS XML') from retry_exc
     except Exception as exc:
         raise FeedError('Invalid or unsafe OPDS XML') from exc
     if root.tag != ATOM + 'feed':
