@@ -23,9 +23,10 @@ def safe_url(url):
     return urlunsplit((parts.scheme, host, parts.path, query, ''))
 
 
-def diagnose(settings, library, seconds=90, pages=200):
+def diagnose(settings, library, seconds=3600, pages=10000):
     result = {'source': safe_url(library.url), 'requests': [], 'comment_recoveries': [],
-              'books_read': 0, 'outcome': None}
+              'books_read': 0, 'outcome': None,
+              'limits': {'seconds': seconds, 'pages': pages}}
     started = time.monotonic()
     client = Client(library, timeout=min(settings.timeout, 10), retries=0,
                     opds_path=settings.opds_path)
@@ -96,8 +97,12 @@ def diagnose(settings, library, seconds=90, pages=200):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default='/data/config.json')
+    parser.add_argument('--seconds', type=int, default=3600, help='Per-library time limit (default: 3600 seconds)')
+    parser.add_argument('--max-pages', type=int, default=10000, help='Per-library page limit (default: 10000)')
     parser.add_argument('servers', nargs='+')
     args = parser.parse_args()
+    if args.seconds < 1 or args.max_pages < 1:
+        parser.error('--seconds and --max-pages must be positive')
     settings = Settings.load(args.config)
     configured = settings.libraries()
     results = []
@@ -108,7 +113,7 @@ def main():
             raise SystemExit('Multiple libraries on this server; specify ?library_id=...')
         if matches and not target.explicit_id:
             target = matches[0]
-        results.append(diagnose(settings, target))
+        results.append(diagnose(settings, target, seconds=args.seconds, pages=args.max_pages))
     json.dump({'diagnostics': results}, sys.stdout, indent=2, ensure_ascii=False)
     print()
 
