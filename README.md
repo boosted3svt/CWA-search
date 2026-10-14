@@ -1,8 +1,8 @@
 # CWA Search
 
-Search multiple Calibre OPDS libraries from a browser on your local network. Preview covers, choose a book and format, and download it into a server folder—including a Calibre-Web Automated ingest folder. MOBI is preferred when available.
+Search multiple Calibre OPDS libraries from a browser on your local network. Preview covers, choose a book and format, and download it into a server folder—including a Calibre-Web Automated ingest folder.
 
-Docker Compose runs the service in the background. Book metadata is cached locally; downloads connect to the original library. Use libraries you have permission to access.
+Docker Compose runs the service in the background. Book metadata is cached locally; downloads connect to the original library. Ensure you only use libraries you have permission to access.
 
 ## Install
 
