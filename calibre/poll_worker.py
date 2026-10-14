@@ -6,7 +6,7 @@ import sys
 import tempfile
 import time
 from config import Settings
-from .client import Client, Library
+from .client import Client, Library, classify_failure
 from .catalog import full_catalog
 from .checkpoint import Checkpoint
 from .images import fetch_image, image_type
@@ -106,7 +106,7 @@ def main():
         run_library(Settings(**request['settings']), Library(**request['library']),
                     request['key'], request['covers_only'])
     except Exception as exc:
-        emit(str(exc), phase='error', error=True)
+        emit(str(exc), phase='error', error=True, category=classify_failure(exc), retry_after=getattr(exc, 'retry_after', 0))
         return 1
     return 0
 

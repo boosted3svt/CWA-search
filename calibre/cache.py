@@ -12,7 +12,7 @@ from pathlib import Path
 import threading
 import time
 from config import Settings
-from .client import ClientError
+from .client import ClientError, ClassifiedError, classify_failure
 from .catalog import ScanCancelled
 from .models import Book
 from .state import atomic_text, state_lock, deduplicate_libraries, try_state_lock
@@ -105,6 +105,11 @@ class CatalogStore:
         entry = self.entry(library)
         if entry.get('refresh_in_progress') or entry.get('covers_in_progress'):
             return True
+        retry_at = entry.get('retry_not_before')
+        if retry_at and datetime.now(timezone.utc) < datetime.fromisoformat(retry_at):
+            return False
+        if retry_at and entry.get('failure_category') == 'temporary':
+            return True
         last = entry.get('last_attempt')
         if not last:
             return True
@@ -163,6 +168,7 @@ class CatalogManager:
         self.events = []
         self.active = None
         self.activities = {}
+        self.batch = {}
         self.logger = logging.Logger('catalog-refresh')
         self.logger.setLevel(logging.INFO)
         self.logger.addHandler(logging.StreamHandler(sys.stdout))
@@ -205,21 +211,30 @@ class CatalogManager:
         lifecycle = LibraryState(settings)
         counters = lifecycle.load()['active']
         for item, (_, library) in zip(entries, libraries):
-            item['download_timeout_count'] = counters.get(library_key(library), {}).get('timeout_count', 0)
+            health = counters.get(library_key(library), {})
+            item['download_timeout_count'] = health.get('timeout_count', 0)
+            item['scan_failure_count'] = health.get('scan_failure_count', 0)
+            item['health'] = health.get('scan_category', 'unknown')
+            item['last_scan_outcome'] = health.get('last_scan_outcome')
         with self.lock:
             running, events = self.running, list(self.events)
+            batch = dict(self.batch)
             activities = [dict(item) for item in self.activities.values()]
             if self.active:
                 activities = [dict(self.active)] + [item for item in activities if item['source'] != self.active['source']]
+        for item, (_, library) in zip(entries, libraries):
+            item['batch_state'] = batch.get(library_key(library), 'not in latest batch')
         for item in activities:
             item['elapsed_seconds'] = round(time.monotonic() - item.pop('started_monotonic'), 1)
         return {'enabled': settings.catalog_cache_enabled, 'running': running, 'events': events,
+                'batch': {name: list(batch.values()).count(name) for name in ('queued','checking','scanning','succeeded','failed','skipped','cancelled')},
                 'libraries': entries, 'interval_hours': settings.catalog_refresh_interval_hours,
                 'active': activities[0] if activities else None, 'active_libraries': activities,
                 'concurrency': settings.catalog_scan_concurrency,
                 'library_timeout_seconds': settings.catalog_library_timeout_seconds,
                 'covers_enabled': settings.catalog_cache_covers,
                 'retired': lifecycle.load()['history'],
+                'scan_failure_limit': settings.library_scan_failure_limit,
                 'download_timeout_limit': settings.library_download_timeout_limit}
 
     def refresh(self, force=False, covers_only=False):
@@ -279,6 +294,7 @@ class CatalogManager:
         reader = threading.Thread(target=read_messages, daemon=True)
         reader.start()
         success, error, cover_summary = False, None, {}
+        error_category, retry_after = 'catalog', 0
         heartbeat = started
         try:
             # Credentials are passed over stdin, never command arguments or files.
@@ -294,7 +310,7 @@ class CatalogManager:
                     raise ScanCancelled('Refresh stopped; saved pages and completed covers retained for resume')
                 elapsed = time.monotonic() - started
                 if elapsed >= settings.catalog_library_timeout_seconds:
-                    raise ClientError(f'Library deadline reached after {elapsed:.1f}s; saved progress retained; moving on')
+                    raise ClassifiedError(f'Library deadline reached after {elapsed:.1f}s; saved progress retained; moving on', 'deadline')
                 try:
                     item = messages.get(timeout=0.1)
                 except queue.Empty:
@@ -304,6 +320,8 @@ class CatalogManager:
                     self.event(f'{library.url}: {item["message"]}')
                     if item.get('phase') == 'metadata-complete' and not covers_only:
                         published = self.publish_metadata(settings, library, generation)
+                        if published:
+                            lifecycle.scan_outcome(library, success=True)
                         with self.lock:
                             self.activities[key]['metadata_published'] = published
                     if item.get('phase') == 'covers-complete':
@@ -315,6 +333,8 @@ class CatalogManager:
                     success = success or item.get('success', False)
                     if item.get('error'):
                         error = item['message']
+                        error_category = item.get('category', 'catalog')
+                        retry_after = item.get('retry_after', 0)
                 if time.monotonic() - heartbeat >= 30:
                     with self.lock:
                         activity = dict(self.activities[key])
@@ -322,7 +342,7 @@ class CatalogManager:
                                f'{elapsed:.0f}s elapsed, deadline {settings.catalog_library_timeout_seconds:g}s)')
                     heartbeat = time.monotonic()
             if process.returncode != 0 or not success:
-                raise ClientError(error or 'Catalog worker exited before completing')
+                raise ClassifiedError(error or 'Catalog worker exited before completing', error_category, retry_after)
             with self.lock:
                 published = self.activities[key]['metadata_published']
             return {**cover_summary, 'metadata_published': published}
@@ -357,7 +377,8 @@ class CatalogManager:
             fields = {'metadata_checkpoint_stamp': state['saved_at'],
                       'covers_pending': settings.catalog_cache_covers,
                       'covers_in_progress': settings.catalog_cache_covers,
-                      'cover_job_only': False, 'covers_error': None}
+                      'cover_job_only': False, 'covers_error': None, 'failure_category': None,
+                      'retry_not_before': None, 'temporary_failure_count': 0}
             if entry.get('metadata_checkpoint_stamp') != state['saved_at']:
                 fields.update(covers_failed=None, covers_last_success=None)
                 store.publish(library, list(books.values()), entry.get('last_attempt', now()), fields)
@@ -370,6 +391,21 @@ class CatalogManager:
         return True
 
     def run_one(self, settings, library, force, covers_only):
+        key = library_key(library)
+        with self.lock:
+            self.batch[key] = 'checking'
+        try:
+            self.scan_one(settings, library, force, covers_only)
+        except Exception:
+            with self.lock:
+                self.batch[key] = 'failed'
+            raise
+        finally:
+            with self.lock:
+                if self.batch.get(key) in ('checking', 'scanning'):
+                    self.batch[key] = 'cancelled' if self.cancelled() else 'skipped'
+
+    def scan_one(self, settings, library, force, covers_only):
         lifecycle = LibraryState(settings, self.event)
         key = library_key(library)
         store = CatalogStore(settings.catalog_cache_dir)
@@ -389,7 +425,15 @@ class CatalogManager:
                         return
                     if not force and not covers_only and not store.due(library, settings.catalog_refresh_interval_hours):
                         return
+                    with self.lock:
+                        self.batch[key] = 'scanning'
                     started = now()
+                    retry_at = entry.get('retry_not_before')
+                    if retry_at and datetime.now(timezone.utc) < datetime.fromisoformat(retry_at):
+                        self.event(f'{library.url}: deferred until {retry_at} (server retry/backoff)')
+                        with self.lock:
+                            self.batch[key] = 'skipped'
+                        return
                     with state_lock(lifecycle.gate):
                         if not lifecycle.allowed(library):
                             return
@@ -406,6 +450,8 @@ class CatalogManager:
                             raise ScanCancelled('Refresh stopped; progress retained for resume')
                         if not covers_only and not summary.get('metadata_published') and not self.publish_metadata(settings, library):
                             raise ClientError('Worker did not save a complete catalog; old snapshot retained')
+                        if not covers_only:
+                            lifecycle.scan_outcome(library, success=True)
                         with state_lock(lifecycle.gate):
                             if not lifecycle.allowed(library):
                                 self.event(f'{library.url}: removed; discarding worker completion')
@@ -413,7 +459,7 @@ class CatalogManager:
                             fields = {'covers_pending': False, 'covers_in_progress': False,
                                       'covers_error': None}
                             if not covers_only:
-                                fields['refresh_in_progress'] = False
+                                fields.update(refresh_in_progress=False, failure_category=None, retry_not_before=None, temporary_failure_count=0)
                             if covers_only or settings.catalog_cache_covers:
                                 fields.update(covers_last_success=now(), covers_failed=summary.get('failed', 0),
                                               covers_checked=summary.get('total', 0))
@@ -430,8 +476,11 @@ class CatalogManager:
                                     checkpoint.clear()
                                 except OSError:
                                     self.event(f'{library.url}: catalog saved, but old checkpoint files could not be removed')
+                        with self.lock:
+                            self.batch[key] = 'succeeded'
                     except Exception as exc:
                         with self.lock:
+                            self.batch[key] = 'cancelled' if isinstance(exc, ScanCancelled) else 'failed'
                             published = covers_only or self.activities.get(key, {}).get('metadata_published', False)
                         if not published:
                             try:
@@ -439,6 +488,11 @@ class CatalogManager:
                                 published = self.publish_metadata(settings, library)
                             except Exception:
                                 pass
+                        category = 'cancelled' if isinstance(exc, ScanCancelled) else classify_failure(exc)
+                        if published and not covers_only:
+                            lifecycle.scan_outcome(library, success=True)
+                        elif not published:
+                            lifecycle.scan_outcome(library, category=category, detail=str(exc), attempt_started=started)
                         with state_lock(lifecycle.gate):
                             present = lifecycle.allowed(library)
                             if present:
@@ -447,6 +501,14 @@ class CatalogManager:
                                           {'error': str(exc), 'refresh_in_progress': isinstance(exc, ScanCancelled)})
                                 if published and not covers_only:
                                     fields['refresh_in_progress'] = False
+                                if not published:
+                                    fields['failure_category'] = category
+                                    from datetime import timedelta
+                                    if category == 'temporary':
+                                        attempts = store.entry(library).get('temporary_failure_count', 0) + 1
+                                        fields['temporary_failure_count'] = attempts
+                                        delay = min(settings.catalog_refresh_interval_hours * 3600, 60 * 2 ** min(attempts - 1, 10))
+                                        fields['retry_not_before'] = (datetime.now(timezone.utc) + timedelta(seconds=max(delay, getattr(exc, 'retry_after', 0)))).isoformat()
                                 store.update(library, fields)
                         message = ('library removed; worker stopped for cache cleanup — ' if not present else
                                    'cover phase interrupted; complete catalog remains searchable — ' if published else
@@ -465,6 +527,8 @@ class CatalogManager:
         try:
             settings = Settings.load(self.config)
             libraries = settings.libraries()
+            with self.lock:
+                self.batch = {library_key(lib): 'queued' for _, lib in libraries}
             self.event(f'Starting batch with up to {settings.catalog_scan_concurrency} parallel libraries')
             with ThreadPoolExecutor(max_workers=settings.catalog_scan_concurrency, thread_name_prefix='catalog-worker') as pool:
                 futures = [pool.submit(self.run_one, settings, library, force, covers_only)
@@ -481,6 +545,7 @@ class CatalogManager:
         finally:
             with self.lock:
                 self.running = False
+            self.event('Batch finished')
 
     def cleanup_if_idle(self, settings):
         # An exclusive activity lock excludes workers in other app instances too.

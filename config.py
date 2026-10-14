@@ -38,6 +38,7 @@ class Settings:
     catalog_checkpoint_max_age_hours: float = 72
     catalog_scan_concurrency: int = 2
     library_download_timeout_limit: int = 3
+    library_scan_failure_limit: int = 3
 
     @classmethod
     def load(cls, filename):
@@ -68,6 +69,8 @@ class Settings:
             raise ValueError('catalog_scan_concurrency must be an integer between 1 and 8')
         if type(settings.library_download_timeout_limit) is not int or settings.library_download_timeout_limit < 0:
             raise ValueError('library_download_timeout_limit must be a nonnegative integer (0 disables retirement)')
+        if type(settings.library_scan_failure_limit) is not int or settings.library_scan_failure_limit < 0:
+            raise ValueError('library_scan_failure_limit must be a nonnegative integer (0 disables scan retirement)')
         return settings
 
     def library(self, line):

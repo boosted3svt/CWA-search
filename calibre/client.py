@@ -38,6 +38,40 @@ class HttpError(ClientError):
         super().__init__(f'Library returned HTTP {status}')
 
 
+class ClassifiedError(ClientError):
+    def __init__(self, message, category, retry_after=0):
+        super().__init__(message)
+        self.category = category
+        self.retry_after = retry_after
+
+
+def classify_failure(exc):
+    """Safe diagnostics: never serialize request URLs, headers, or credentials."""
+    if isinstance(exc, ClassifiedError):
+        return exc.category
+    current, seen = exc, set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, requests.exceptions.SSLError):
+            return 'configuration'
+        if isinstance(current, (LibraryTimeout, requests.Timeout)):
+            return 'connectivity'
+        if isinstance(current, requests.exceptions.ProxyError):
+            return 'configuration'
+        if isinstance(current, requests.ConnectionError):
+            return 'connectivity'
+        if isinstance(current, HttpError):
+            if current.status in (401, 403):
+                return 'configuration'
+            if current.status == 429 or current.status >= 500:
+                return 'temporary'
+            return 'catalog'
+        current = current.__cause__
+    if isinstance(exc, FeedError):
+        return 'catalog'
+    return 'catalog'
+
+
 def origin(url):
     parsed = urlsplit(url)
     if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
@@ -81,9 +115,9 @@ class Client:
     def check_url(self, url):
         target = origin(url)
         if target != self.base_origin and target[1] not in self.library.allowed_hosts:
-            raise ClientError('Link or redirect points outside the configured server/allowed hosts')
+            raise ClassifiedError('Link or redirect points outside the configured server/allowed hosts', 'configuration')
         if self.base_origin[0] == 'https' and target[0] != 'https':
-            raise ClientError('HTTPS downgrade refused')
+            raise ClassifiedError('HTTPS downgrade refused', 'configuration')
 
     def get(self, url):
         for redirect in range(6):
@@ -101,13 +135,19 @@ class Client:
                 except requests.Timeout as exc:
                     if attempt == self.retries:
                         raise LibraryTimeout('Library request timed out') from exc
+                except requests.exceptions.SSLError as exc:
+                    raise ClassifiedError('TLS certificate verification or negotiation failed; check certificate and HTTPS configuration', 'configuration') from exc
+                except requests.exceptions.ProxyError as exc:
+                    raise ClassifiedError('Proxy connection failed; check host proxy configuration', 'configuration') from exc
+                except requests.ConnectionError as exc:
+                    raise ClassifiedError(connection_diagnostic(exc), 'connectivity') from exc
                 except requests.RequestException as exc:
-                    raise ClientError('Library connection failed') from exc
+                    raise ClassifiedError('Library request configuration failed', 'configuration') from exc
                 else:
                     if response.status_code not in (429, 500, 502, 503, 504) or attempt == self.retries:
                         break
                     response.close()
-                time.sleep(min(0.5 * 2 ** attempt, 4))
+                time.sleep(max(min(0.5 * 2 ** attempt, 4), retry_after_seconds(response.headers.get('Retry-After')) if response is not None else 0))
             if response.status_code in (301, 302, 303, 307, 308):
                 location = response.headers.get('Location')
                 response.close()
@@ -118,7 +158,9 @@ class Client:
             if response.status_code != 200:
                 status = response.status_code
                 response.close()
-                raise HttpError(status)
+                error = HttpError(status)
+                error.retry_after = retry_after_seconds(response.headers.get('Retry-After'))
+                raise error
             return response, url
         raise ClientError('Too many redirects')
 
@@ -133,8 +175,8 @@ class Client:
                 chunks.append(chunk)
             return b''.join(chunks), final_url
         except requests.RequestException as exc:
-            # A body read failure does not justify removing a library from the list.
-            raise ClientError('OPDS feed transfer failed') from exc
+            # Preserve a safe category for the isolated metadata polling worker.
+            raise ClassifiedError('OPDS feed transfer timed out' if is_timeout_error(exc) else 'OPDS feed transfer failed', classify_failure(exc)) from exc
         finally:
             response.close()
 
@@ -224,3 +266,39 @@ class Client:
             url = next_url
         self.truncated = True
         return books
+
+
+def retry_after_seconds(value):
+    from email.utils import parsedate_to_datetime
+    from datetime import datetime, timezone
+    try:
+        import math
+        delay = float(value)
+        return max(0, delay) if math.isfinite(delay) else 0
+    except (TypeError, ValueError):
+        try:
+            return max(0, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+
+def connection_diagnostic(exc):
+    import errno
+    import socket
+    seen, pending = set(), [exc]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, socket.gaierror) or type(current).__name__ == 'NameResolutionError':
+            return 'Library connection failed: DNS name resolution failed'
+        if isinstance(current, OSError) and current.errno == errno.ECONNREFUSED:
+            return 'Library connection failed: connection refused'
+        if isinstance(current, OSError) and current.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH):
+            return 'Library connection failed: network or host unreachable'
+        if isinstance(current, requests.exceptions.ProxyError):
+            return 'Library connection failed: proxy connection failed'
+        pending.extend(value for value in (current.__cause__, current.__context__, *current.args)
+                       if isinstance(value, BaseException))
+    return 'Library connection failed: connection interrupted or could not be established'

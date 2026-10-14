@@ -156,7 +156,13 @@ async function loadCatalogs() {
     }
     const cached = state.libraries.filter(library => library.cached).length;
     const count = state.libraries.reduce((total, library) => total + library.book_count, 0);
-    $('catalog-summary').textContent = `${state.running ? 'Refresh running. ' : ''}${count.toLocaleString()} cached books across ${cached}/${state.libraries.length} libraries. Refresh interval: ${state.interval_hours} hours. Parallel libraries: ${state.concurrency}. Searches use local metadata; downloads connect to the source server.`;
+    $('catalog-summary').textContent = `${state.running ? 'Refresh running. ' : ''}${count.toLocaleString()} cached books. Searchable catalogs: ${cached} of ${state.libraries.length} configured libraries. Refresh interval: ${state.interval_hours} hours. Parallel libraries: ${state.concurrency}. Searches use local metadata; downloads connect to the source server.`;
+    const healthCounts = {};
+    const healthNames = {healthy:'Metadata scan succeeded', connectivity:'Unreachable', configuration:'Needs configuration', temporary:'Temporary server error', catalog:'Catalog unsupported or invalid', deadline:'Scan time limit reached', cancelled:'Scan stopped', unknown:'Not yet classified'};
+    for (const library of state.libraries) healthCounts[library.health || 'unknown'] = (healthCounts[library.health || 'unknown'] || 0) + 1;
+    $('catalog-summary').textContent += ' Latest scan outcomes: ' + Object.entries(healthCounts).map(([key,count]) => `${healthNames[key] || key}: ${count}`).join('; ') + '.';
+    const batch = state.batch || {};
+    $('catalog-summary').textContent += ' Current/latest batch: ' + Object.entries(batch).map(([name,count]) => `${name}: ${count}`).join('; ') + '.';
     $('refresh-catalogs').disabled = state.running;
     $('refresh-covers').disabled = state.running || !state.covers_enabled;
     $('stop-catalogs').hidden = !state.running;
@@ -170,7 +176,7 @@ async function loadCatalogs() {
     $('catalog-libraries').replaceChildren();
     for (const library of state.libraries) {
       const date = library.last_success ? new Date(library.last_success).toLocaleString() : 'not yet cached';
-      $('catalog-libraries').append(node('p', `${library.source} · ${library.book_count.toLocaleString()} books · ${date} · Download timeouts: ${library.download_timeout_count || 0}${library.error ? ' · Refresh failed: '+library.error : (library.stale && library.cached ? ' · Older cached data' : '')}${library.covers_pending ? ' · Cover fetching pending; catalog searchable' : ''}${library.covers_error ? ' · Cover refresh failed: '+library.covers_error : ''}${library.covers_failed ? ' · '+library.covers_failed+' covers unavailable' : ''}`, 'source'));
+      $('catalog-libraries').append(node('p', `${library.source} · Batch: ${library.batch_state} · ${healthNames[library.health] || 'Not yet classified'} · ${library.cached ? 'Searchable cached catalog' : 'No searchable catalog'} · ${library.book_count.toLocaleString()} books · ${date} · Last attempt: ${library.last_attempt ? new Date(library.last_attempt).toLocaleString() : 'never'} · Download timeouts: ${library.download_timeout_count || 0} · Connectivity scan failures: ${library.scan_failure_count || 0}/${state.scan_failure_limit || "retirement disabled"}${library.error ? ' · Refresh failed: '+library.error : (library.stale && library.cached ? ' · Older cached data' : '')}${library.covers_pending ? ' · Cover fetching pending; catalog searchable' : ''}${library.covers_error ? ' · Cover refresh failed: '+library.covers_error : ''}${library.covers_failed ? ' · '+library.covers_failed+' covers unavailable' : ''}`, 'source'));
     }
   } catch (error) { /* Foreground actions report connection failures separately. */ }
 }
@@ -212,12 +218,12 @@ function renderRetired(state) {
   const entries = state.retired || [];
   $('retired-panel').hidden = entries.length === 0;
   $('retirement-summary').textContent = `Download timeout limit: ${state.download_timeout_limit === 0 ? 'disabled' : state.download_timeout_limit}. Successful downloads reset the counter. Clearing history does not re-add servers.`;
-  $('restore-all-retired').disabled = !entries.some(item => item.reason === 'download-timeouts' && !item.restored_at);
+  $('restore-all-retired').disabled = !entries.some(item => ['download-timeouts','scan-connectivity'].includes(item.reason) && !item.restored_at);
   $('retired-entries').replaceChildren();
   for (const entry of entries.slice().reverse()) {
     const row = node('div', '', 'retired-entry');
-    const reason = entry.reason === 'download-timeouts' ? 'Download timeout limit reached' : 'Removed from library list';
-    row.append(node('p', `${entry.source}${entry.library_id ? ' · '+entry.library_id : ''} · ${reason} · ${entry.timeout_count} timeouts · ${new Date(entry.retired_at).toLocaleString()}${entry.restored_at ? ' · Restored '+new Date(entry.restored_at).toLocaleString() : ''}`, 'source'));
+    const reason = entry.reason === 'download-timeouts' ? 'Download timeout limit reached' : entry.reason === 'scan-connectivity' ? 'Connectivity scan failure limit reached' : 'Removed from library list';
+    row.append(node('p', `${entry.source}${entry.library_id ? ' · '+entry.library_id : ''} · ${reason} · ${entry.timeout_count} download timeouts · ${entry.scan_failure_count || 0} connectivity scan failures · ${new Date(entry.retired_at).toLocaleString()}${entry.restored_at ? ' · Restored '+new Date(entry.restored_at).toLocaleString() : ''}`, 'source'));
     if (!entry.restored_at) {
       const button = node('button', 'Restore server'); button.type = 'button'; button.className = 'restore-retired';
       button.addEventListener('click', async () => {

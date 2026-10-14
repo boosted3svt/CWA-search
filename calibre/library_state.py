@@ -49,14 +49,14 @@ class LibraryState:
 
     def new_entry(self, line, library):
         return {'line': line, 'source': library.url, 'library_id': library.library_id,
-                'explicit_id': library.explicit_id, 'timeout_count': 0, 'generation': uuid.uuid4().hex}
+                'explicit_id': library.explicit_id, 'timeout_count': 0, 'scan_failure_count': 0, 'generation': uuid.uuid4().hex}
 
     def remove_entry(self, data, key, reason):
         entry = data['active'].pop(key)
         record = {**entry, 'id': uuid.uuid4().hex, 'key': key, 'retired_at': now(), 'reason': reason}
         data['history'].append(record)
         data['pending'][key] = record
-        self.report(f'Removed {entry["source"]}: {reason}; {entry["timeout_count"]} consecutive download timeouts')
+        self.report(f'Removed {entry["source"]}: {reason}; {entry["timeout_count"]} download timeouts; {entry.get("scan_failure_count", 0)} connectivity scan failures')
 
     def reconcile(self):
         with state_lock(self.gate):
@@ -157,6 +157,54 @@ class LibraryState:
                     self.save(data)
                     self.report(f'Purged cached catalog, checkpoints, and {len(candidates - keep)} unshared covers for {source}')
 
+    def remove_configured(self, key):
+        path = Path(self.settings.libraries_file)
+        with state_lock(path):
+            original = path.read_text()
+            kept = []
+            for line in original.splitlines(keepends=True):
+                if line.strip() and not line.lstrip().startswith('#'):
+                    try:
+                        if library_key(self.settings.library(line)) == key:
+                            continue
+                    except ValueError:
+                        pass
+                kept.append(line)
+            atomic_text(path.with_name(path.name + '.bak'), original)
+            atomic_text(path, ''.join(kept))
+
+    def scan_outcome(self, library, success=False, category=None, detail=None, attempt_started=None):
+        """At most one connectivity count per refresh interval, including manual scans."""
+        key = library_key(library)
+        with state_lock(self.gate):
+            data = self.load()
+            entry = data['active'].get(key)
+            if not entry or key not in self.configured():
+                return
+            entry['scan_category'] = 'healthy' if success else category
+            entry['scan_detail'] = None if success else detail
+            entry['last_scan_outcome'] = now()
+            if success:
+                entry['scan_failure_count'] = 0
+                entry.pop('last_counted_scan_failure', None)
+            elif category == 'connectivity':
+                stamp = entry.get('last_counted_scan_failure')
+                attempt_time = datetime.fromisoformat(attempt_started) if attempt_started else datetime.now(timezone.utc)
+                elapsed = ((attempt_time - datetime.fromisoformat(stamp)).total_seconds()
+                           if stamp else float('inf'))
+                if elapsed >= self.settings.catalog_refresh_interval_hours * 3600:
+                    entry['scan_failure_count'] = entry.get('scan_failure_count', 0) + 1
+                    entry['last_counted_scan_failure'] = attempt_time.isoformat()
+            elif category not in ('cancelled', 'deadline'):
+                # A server response breaks the sequence of unreachable scans.
+                entry['scan_failure_count'] = 0
+                entry.pop('last_counted_scan_failure', None)
+            limit = self.settings.library_scan_failure_limit
+            if category == 'connectivity' and limit and entry.get('scan_failure_count', 0) >= limit:
+                self.remove_configured(key)
+                self.remove_entry(data, key, 'scan-connectivity')
+            self.save(data)
+
     def outcome(self, library, success=False, timed_out=False):
         """One count per terminal operation, and success resets consecutive timeouts."""
         if not success and not timed_out:
@@ -173,20 +221,7 @@ class LibraryState:
             limit = self.settings.library_download_timeout_limit
             retired = not success and limit > 0 and entry['timeout_count'] >= limit
             if retired:
-                path = Path(self.settings.libraries_file)
-                with state_lock(path):
-                    original = path.read_text()
-                    kept = []
-                    for line in original.splitlines(keepends=True):
-                        if line.strip() and not line.lstrip().startswith('#'):
-                            try:
-                                if library_key(self.settings.library(line)) == key:
-                                    continue
-                            except ValueError:
-                                pass
-                        kept.append(line)
-                    atomic_text(path.with_name(path.name + '.bak'), original)
-                    atomic_text(path, ''.join(kept))
+                self.remove_configured(key)
                 self.remove_entry(data, key, 'download-timeouts')
             count = entry['timeout_count']
             self.save(data)
@@ -198,7 +233,7 @@ class LibraryState:
         with state_lock(self.gate):
             data = self.load()
             records = [item for item in data['history'] if not item.get('restored_at') and
-                       ((all_retired and item['reason'] == 'download-timeouts') or item['id'] == record_id)]
+                       ((all_retired and item['reason'] in ('download-timeouts', 'scan-connectivity')) or item['id'] == record_id)]
             if not records:
                 raise ValueError('No retired entries selected')
             if any(item['key'] in data['pending'] for item in records):
@@ -220,6 +255,8 @@ class LibraryState:
                             data['active'][item['key']] = self.new_entry(line, library)
                         else:
                             data['active'][item['key']]['timeout_count'] = 0
+                            data['active'][item['key']]['scan_failure_count'] = 0
+                            data['active'][item['key']].pop('last_counted_scan_failure', None)
                     item['restored_at'] = now()
                 if additions:
                     atomic_text(path, original + ('\n' if original and not original.endswith('\n') else '') +
