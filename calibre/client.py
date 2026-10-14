@@ -113,9 +113,14 @@ class Client:
     def close(self):
         self.session.close()
 
+    def is_library_origin(self, target):
+        # Advertised HTTPS links may use the TLS port rather than the HTTP port.
+        return target == self.base_origin or (self.base_origin[0] == 'http' and
+                target[0] == 'https' and target[1] == self.base_origin[1])
+
     def check_url(self, url):
         target = origin(url)
-        if target != self.base_origin and target[1] not in self.library.allowed_hosts:
+        if not self.is_library_origin(target) and target[1] not in self.library.allowed_hosts:
             raise ClassifiedError('Link or redirect points outside the configured server/allowed hosts', 'configuration')
         if self.base_origin[0] == 'https' and target[0] != 'https':
             raise ClassifiedError('HTTPS downgrade refused', 'configuration')
@@ -124,14 +129,14 @@ class Client:
         for redirect in range(6):
             self.check_url(url)
             auth = None
-            if origin(url) == self.base_origin and self.library.username is not None:
+            if self.is_library_origin(origin(url)) and self.library.username is not None:
                 auth = (self.library.username, self.library.password or '')
             response = None
             for attempt in range(self.retries + 1):
                 try:
                     response = self.session.get(url, timeout=self.timeout, stream=True,
                                                 allow_redirects=False, auth=auth,
-                                                verify=self.library.verify_tls if origin(url) == self.base_origin else True,
+                                                verify=self.library.verify_tls if self.is_library_origin(origin(url)) else True,
                                                 proxies=requests.utils.get_environ_proxies(url),
                                                 headers={'Accept-Encoding': 'identity'})
                 except requests.Timeout as exc:
@@ -155,7 +160,10 @@ class Client:
                 response.close()
                 if not location:
                     raise ClientError('Redirect has no Location')
-                url = urljoin(url, location)
+                next_url = urljoin(url, location)
+                if origin(url)[0] == 'https' and origin(next_url)[0] != 'https':
+                    raise ClassifiedError('HTTPS downgrade refused', 'configuration')
+                url = next_url
                 continue
             if response.status_code != 200:
                 status = response.status_code

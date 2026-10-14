@@ -36,3 +36,30 @@ def test_setting_must_be_boolean(tmp_path,value):
     config.write_text(json.dumps({'verify_tls':value}))
     with pytest.raises(ValueError,match='verify_tls'):
         Settings.load(config)
+
+@pytest.mark.parametrize('verify', [True,False])
+def test_same_host_https_redirect_uses_library_tls_setting_and_auth(verify):
+    session=Session([Response(status=301,headers={'Location':'https://one.test/opds/'}),Response(b'feed')])
+    library=Library('http://one.test',username='user',password='password',verify_tls=verify)
+    client=Client(library,session=session)
+    response,final=client.get('http://one.test/opds')
+    assert final=='https://one.test/opds/'
+    assert session.calls[1][1]['verify'] is verify
+    assert session.calls[1][1]['auth']==('user','password')
+    assert library.url=='http://one.test'
+
+
+def test_advertised_https_link_on_same_host_and_custom_port():
+    session=Session([Response(b'feed')])
+    client=Client(Library('http://one.test:8080',verify_tls=False),session=session)
+    client.get('https://one.test:8443/opds/all')
+    assert session.calls[0][1]['verify'] is False
+
+
+def test_upgraded_redirect_chain_cannot_return_to_http():
+    from calibre.client import ClientError
+    session=Session([Response(status=301,headers={'Location':'https://one.test/opds'}),
+                     Response(status=302,headers={'Location':'http://one.test/opds/'})])
+    with pytest.raises(ClientError,match='downgrade'):
+        Client(Library('http://one.test'),session=session).get('http://one.test/opds')
+    assert len(session.calls)==2
