@@ -20,6 +20,7 @@ def make_client(settings, library):
 
 
 def result_library(book, libraries):
+    libraries = sorted(libraries, key=lambda pair: not pair[1].explicit_id)
     for _, library in libraries:
         if library.url == book.source and (not library.explicit_id or library.library_id == book.library_id):
             return replace(library, library_id=book.library_id)
@@ -69,6 +70,8 @@ def search(args, settings, history):
     for line, library in libraries:
         print(f'Searching: {library.url}', file=sys.stderr)
         client = make_client(settings, library)
+        from calibre.servers import search_discovery
+        client.on_libraries = search_discovery(settings, library, libraries)
         try:
             books = client.search(term)
             successes += 1

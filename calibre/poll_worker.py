@@ -54,6 +54,9 @@ def run_library(settings, library, key, covers_only=False, report=emit):
     checkpoint = checkpoint_for(settings, library, key)
     client = Client(library, timeout=settings.timeout, retries=settings.retries,
                     auto_discover=True, opds_path=settings.opds_path)
+    client.on_libraries = lambda ids, default: report(
+        'Advertised libraries: '+', '.join(sorted(set(ids))), phase='libraries-discovered',
+        library_ids=sorted(set(ids)), default_library_id=default)
     try:
         reuse = False
         if covers_only:
@@ -74,7 +77,10 @@ def run_library(settings, library, key, covers_only=False, report=emit):
             if books is not None and not resume_complete:
                 report('Checking remote book count against saved metadata', phase='metadata', count=0)
                 remote_count = catalog_count(client, pause=lambda: time.sleep(settings.catalog_request_delay))
-                reuse = remote_count == len(books) if remote_count is not None else False
+                same_library = not books or not client.resolved_library_id or books[0].library_id == client.resolved_library_id
+                reuse = remote_count == len(books) and same_library if remote_count is not None else False
+                if not same_library:
+                    checkpoint.clear()
                 if reuse:
                     report(f'Book count unchanged: {remote_count}; reusing saved metadata',
                            phase='metadata-unchanged', count=remote_count)

@@ -156,7 +156,7 @@ async function loadCatalogs() {
     }
     const cached = state.libraries.filter(library => library.cached).length;
     const count = state.libraries.reduce((total, library) => total + library.book_count, 0);
-    $('catalog-summary').textContent = `${state.running ? 'Refresh running. ' : ''}${count.toLocaleString()} cached books. Searchable catalogs: ${cached} of ${state.libraries.length} configured libraries. Refresh interval: ${state.interval_hours} hours. Parallel libraries: ${state.concurrency}. Searches use local metadata; downloads connect to the source server.`;
+    $('catalog-summary').textContent = `${state.running ? 'Refresh running. ' : ''}${count.toLocaleString()} cached books. Searchable catalogs: ${cached} of ${state.libraries.length} discovered/configured libraries across ${state.server_count || state.libraries.length} servers. Refresh interval: ${state.interval_hours} hours. Parallel libraries: ${state.concurrency}. Searches use local metadata; downloads connect to the source server.`;
     const healthCounts = {};
     const healthNames = {healthy:'Metadata scan succeeded', connectivity:'Unreachable', configuration:'Needs configuration', temporary:'Temporary server error', catalog:'Catalog unsupported or invalid', deadline:'Scan time limit reached', cancelled:'Scan stopped', unknown:'Not yet classified'};
     for (const library of state.libraries) healthCounts[library.health || 'unknown'] = (healthCounts[library.health || 'unknown'] || 0) + 1;
@@ -167,16 +167,16 @@ async function loadCatalogs() {
     $('refresh-covers').disabled = state.running || !state.covers_enabled;
     $('stop-catalogs').hidden = !state.running;
     const activeLibraries = state.active_libraries || (state.active ? [state.active] : []);
-    const phaseNames = {starting:'Connecting',metadata:'Reading books','metadata-unchanged':'Book count unchanged; catalog reused','metadata-complete':'Catalog ready',covers:'Fetching covers','covers-complete':'Cover attempts complete',complete:'Finished',saving:'Saving catalog',error:'Refresh failed'};
+    const phaseNames = {'libraries-discovered':'Discovering libraries',starting:'Connecting',metadata:'Reading books','metadata-unchanged':'Book count unchanged; catalog reused','metadata-complete':'Catalog ready',covers:'Fetching covers','covers-complete':'Cover attempts complete',complete:'Finished',saving:'Saving catalog',error:'Refresh failed'};
     $('catalog-progress').replaceChildren();
     for (const active of activeLibraries) {
-      $('catalog-progress').append(node('p', `${active.worker_id ? '[worker '+active.worker_id+'] ' : ''}${active.source} · ${phaseNames[active.phase] || active.phase} · ${active.count || 0}${active.total !== undefined ? '/'+active.total : ''} · ${Math.round(active.elapsed_seconds)}s elapsed / ${active.deadline_seconds}s limit · Last progress: ${new Date(active.last_activity).toLocaleTimeString()}`, 'source'));
+      $('catalog-progress').append(node('p', `${active.worker_id ? '[worker '+active.worker_id+'] ' : ''}${active.source}${active.library_id ? " [library " + active.library_id + "]" : " [default library]"} · ${phaseNames[active.phase] || active.phase} · ${active.count || 0}${active.total !== undefined ? '/'+active.total : ''} · ${Math.round(active.elapsed_seconds)}s elapsed / ${active.deadline_seconds}s limit · Last progress: ${new Date(active.last_activity).toLocaleTimeString()}`, 'source'));
     }
     $('catalog-events').textContent = state.events.join('\n');
     $('catalog-libraries').replaceChildren();
     for (const library of state.libraries) {
       const date = library.last_success ? new Date(library.last_success).toLocaleString() : 'not yet cached';
-      $('catalog-libraries').append(node('p', `${library.source} · Batch: ${library.batch_state} · ${healthNames[library.health] || 'Not yet classified'} · ${library.cached ? 'Searchable cached catalog' : 'No searchable catalog'} · ${library.book_count.toLocaleString()} books · ${date} · Last attempt: ${library.last_attempt ? new Date(library.last_attempt).toLocaleString() : 'never'} · Download timeouts: ${library.download_timeout_count || 0} · Connectivity scan failures: ${library.scan_failure_count || 0}/${state.scan_failure_limit || "retirement disabled"}${library.error ? ' · Refresh failed: '+library.error : (library.stale && library.cached ? ' · Older cached data' : '')}${library.covers_pending ? ' · Cover fetching pending; catalog searchable' : ''}${library.covers_error ? ' · Cover refresh failed: '+library.covers_error : ''}${library.covers_failed ? ' · '+library.covers_failed+' covers unavailable' : ''}`, 'source'));
+      $('catalog-libraries').append(node('p', `${library.source}${library.library_id ? " [library " + library.library_id + "]" : " [default library]"} · Batch: ${library.batch_state} · ${healthNames[library.health] || 'Not yet classified'} · ${library.cached ? 'Searchable cached catalog' : 'No searchable catalog'} · ${library.book_count.toLocaleString()} books · ${date} · Last attempt: ${library.last_attempt ? new Date(library.last_attempt).toLocaleString() : 'never'} · Download timeouts: ${library.download_timeout_count || 0} · Connectivity scan failures: ${library.scan_failure_count || 0}/${state.scan_failure_limit || "retirement disabled"}${library.error ? ' · Refresh failed: '+library.error : (library.stale && library.cached ? ' · Older cached data' : '')}${library.covers_pending ? ' · Cover fetching pending; catalog searchable' : ''}${library.covers_error ? ' · Cover refresh failed: '+library.covers_error : ''}${library.covers_failed ? ' · '+library.covers_failed+' covers unavailable' : ''}`, 'source'));
     }
   } catch (error) { /* Foreground actions report connection failures separately. */ }
 }
@@ -222,9 +222,9 @@ function renderRetired(state) {
   $('retired-entries').replaceChildren();
   for (const entry of entries.slice().reverse()) {
     const row = node('div', '', 'retired-entry');
-    const reason = entry.reason === 'download-timeouts' ? 'Download timeout limit reached' : entry.reason === 'scan-connectivity' ? 'Connectivity scan failure limit reached' : 'Removed from library list';
+    const reason = entry.reason === 'download-timeouts' ? 'Download timeout limit reached' : entry.reason === 'scan-connectivity' ? 'Connectivity scan failure limit reached' : entry.reason === 'library-unadvertised' ? 'Library no longer advertised by server' : 'Removed from library list';
     row.append(node('p', `${entry.source}${entry.library_id ? ' · '+entry.library_id : ''} · ${reason} · ${entry.timeout_count} download timeouts · ${entry.scan_failure_count || 0} connectivity scan failures · ${new Date(entry.retired_at).toLocaleString()}${entry.restored_at ? ' · Restored '+new Date(entry.restored_at).toLocaleString() : ''}`, 'source'));
-    if (!entry.restored_at) {
+    if (!entry.restored_at && entry.reason !== 'library-unadvertised') {
       const button = node('button', 'Restore server'); button.type = 'button'; button.className = 'restore-retired';
       button.addEventListener('click', async () => {
         try { await api('/api/retired/restore', {id:entry.id}); await loadCatalogs(); await loadSettings(); }

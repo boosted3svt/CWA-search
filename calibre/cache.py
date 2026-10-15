@@ -198,10 +198,12 @@ class CatalogManager:
         store = CatalogStore(settings.catalog_cache_dir)
         libraries = settings.libraries() if Path(settings.libraries_file).exists() else []
         manifest = store.manifest()['libraries']
+        from .servers import registry
+        servers = registry(settings)
         entries = []
         for _, library in libraries:
             entry = manifest.get(library_key(library), {})
-            entries.append({'source': library.url, 'book_count': entry.get('book_count', 0),
+            entries.append({'source': library.url, 'library_id': (library.library_id if library.explicit_id else servers.get(library.url, {}).get('default_id', library.library_id)), 'book_count': entry.get('book_count', 0),
                             'last_success': entry.get('last_success'), 'last_attempt': entry.get('last_attempt'),
                             'error': entry.get('error'), 'cached': bool(entry.get('snapshot')),
                             'covers_error': entry.get('covers_error'),
@@ -228,6 +230,7 @@ class CatalogManager:
             item['elapsed_seconds'] = round(time.monotonic() - item.pop('started_monotonic'), 1)
         return {'enabled': settings.catalog_cache_enabled, 'running': running, 'events': events,
                 'batch': {name: list(batch.values()).count(name) for name in ('queued','checking','scanning','succeeded','failed','skipped','cancelled')},
+                'server_count': len({lib.url for _, lib in settings.raw_libraries()}),
                 'libraries': entries, 'interval_hours': settings.catalog_refresh_interval_hours,
                 'active': activities[0] if activities else None, 'active_libraries': activities,
                 'concurrency': settings.catalog_scan_concurrency,
@@ -276,7 +279,7 @@ class CatalogManager:
         next_membership_check = started
         with self.lock:
             self.activities[key] = {'source': library.url, 'phase': 'starting', 'count': 0,
-                           'worker_id': current_worker_id(),
+                           'worker_id': current_worker_id(), 'library_id': library.library_id,
                            'metadata_published': False,
                            'started_monotonic': started, 'last_activity': now(),
                            'deadline_seconds': settings.catalog_library_timeout_seconds}
@@ -317,7 +320,17 @@ class CatalogManager:
                     if process.poll() is not None and not reader.is_alive() and messages.empty():
                         break
                 else:
-                    self.event(f'{library.url}: {item["message"]}')
+                    self.event(f'{library.url}'+(f' [library {library.library_id}]' if library.explicit_id else ' [default library]')+f': {item["message"]}')
+                    if item.get('phase') == 'libraries-discovered' and (not library.explicit_id or library.parent_url):
+                        from .servers import advertise
+                        advertise(settings, library.url, item.get('library_ids', []),
+                                  item.get('default_library_id'), authoritative=not library.explicit_id)
+                        LibraryState(settings, self.event).reconcile()
+                        with self.lock:
+                            if not library.explicit_id:
+                                self.activities[key]['library_id'] = item.get('default_library_id') or library.library_id
+                            for _, discovered in settings.libraries():
+                                self.batch.setdefault(library_key(discovered), 'queued')
                     if item.get('phase') == 'metadata-unchanged' and not covers_only:
                         with state_lock(lifecycle.gate):
                             if not lifecycle.allowed(library, generation):
@@ -538,6 +551,27 @@ class CatalogManager:
                 self.active = None
             lifecycle.purge_pending()
 
+    def run_server(self, settings, server, force, covers_only):
+        if server.explicit_id:
+            return self.run_one(settings, server, force, covers_only)
+        done = set()
+        known = {library_key(lib) for _, lib in settings.libraries() if lib.url == server.url}
+        try:
+            while not self.cancelled():
+                candidates = [lib for _, lib in settings.libraries() if lib.url == server.url]
+                known.update(library_key(lib) for lib in candidates)
+                choices = [lib for lib in candidates if library_key(lib) not in done]
+                if not choices:
+                    break
+                library = choices[0]
+                done.add(library_key(library))
+                self.run_one(settings, library, force, covers_only)
+        finally:
+            with self.lock:
+                for key in known:
+                    if self.batch.get(key) == 'queued':
+                        self.batch[key] = 'cancelled' if self.cancelled() else 'skipped'
+
     def run(self, force, covers_only=False):
         try:
             settings = Settings.load(self.config)
@@ -546,8 +580,10 @@ class CatalogManager:
                 self.batch = {library_key(lib): 'queued' for _, lib in libraries}
             self.event(f'Starting batch with up to {settings.catalog_scan_concurrency} parallel libraries')
             with ThreadPoolExecutor(max_workers=settings.catalog_scan_concurrency, thread_name_prefix='catalog-worker') as pool:
-                futures = [pool.submit(self.run_one, settings, library, force, covers_only)
-                           for _, library in libraries]
+                bare = {lib.url for _, lib in settings.raw_libraries() if not lib.explicit_id}
+                servers = [lib for _, lib in settings.raw_libraries() if not lib.explicit_id or lib.url not in bare]
+                futures = [pool.submit(self.run_server, settings, library, force, covers_only)
+                           for library in servers]
                 for future in as_completed(futures):
                     try:
                         future.result()

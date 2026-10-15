@@ -92,7 +92,11 @@ class Settings:
                        os.environ.get(self.username_env) or None, os.environ.get(self.password_env) or None,
                        explicit_id='library_id' in query, verify_tls=self.verify_tls)
 
-    def libraries(self):
+    def raw_libraries(self):
         path = Path(self.libraries_file)
         lines = path.read_text().splitlines()
         return [(line, self.library(line)) for line in lines if line.strip() and not line.lstrip().startswith('#')]
+
+    def libraries(self):
+        from calibre.servers import expand
+        return expand(self, self.raw_libraries())

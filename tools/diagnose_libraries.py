@@ -1,4 +1,5 @@
 """Read-only OPDS diagnostics. Run via stdin inside the existing Docker image."""
+from dataclasses import replace
 import argparse
 import json
 import sys
@@ -28,8 +29,15 @@ def diagnose(settings, library, seconds=3600, pages=10000):
               'books_read': 0, 'outcome': None,
               'limits': {'seconds': seconds, 'pages': pages}}
     started = time.monotonic()
+    result['library_id'] = library.library_id
+    result['advertised_library_ids'] = []
+    def discovered(ids, default):
+        result['advertised_library_ids'] = ids
+        if default:
+            result['library_id'] = default
     client = Client(library, timeout=min(settings.timeout, 10), retries=0,
                     opds_path=settings.opds_path)
+    client.on_libraries = discovered
     last_page = {}
     request_get, check_url, read_feed = client.session.get, client.check_url, client.read_feed
 
@@ -109,11 +117,17 @@ def main():
     for address in args.servers:
         target = settings.library(address)
         matches = [lib for _, lib in configured if lib.url == target.url]
-        if len(matches) > 1 and not target.explicit_id:
-            raise SystemExit('Multiple libraries on this server; specify ?library_id=...')
-        if matches and not target.explicit_id:
-            target = matches[0]
-        results.append(diagnose(settings, target, seconds=args.seconds, pages=args.max_pages))
+        if target.explicit_id:
+            results.append(diagnose(settings, target, seconds=args.seconds, pages=args.max_pages))
+            continue
+        primary = next((lib for lib in matches if not lib.explicit_id), target)
+        report = diagnose(settings, primary, seconds=args.seconds, pages=args.max_pages)
+        results.append(report)
+        ids = sorted(set(report['advertised_library_ids'] + [lib.library_id for lib in matches if lib.explicit_id]))
+        for identifier in ids:
+            if identifier and identifier != report['library_id']:
+                child = replace(primary, library_id=identifier, explicit_id=True, parent_url=primary.url)
+                results.append(diagnose(settings, child, seconds=args.seconds, pages=args.max_pages))
     json.dump({'diagnostics': results}, sys.stdout, indent=2, ensure_ascii=False)
     print()
 

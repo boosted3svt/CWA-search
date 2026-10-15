@@ -92,6 +92,7 @@ class Library:
     password: str | None = field(default=None, repr=False)
     explicit_id: bool = False
     verify_tls: bool = True
+    parent_url: str = ''
 
 
 class Client:
@@ -109,6 +110,8 @@ class Client:
         self.auto_discover, self.opds_path = auto_discover, opds_path
         self.resolved_library_id = library.library_id
         self.discovery_message = ''
+        self.on_libraries = None
+        self.advertised_library_ids = set()
 
     def close(self):
         self.session.close()
@@ -167,15 +170,27 @@ class Client:
                 continue
             if response.status_code != 200:
                 status = response.status_code
+                empty_catalog = False
+                if status == 404 and '/opds/navcatalog/' in urlsplit(url).path:
+                    try:
+                        empty_catalog = next(response.iter_content(64), b'').strip() == b'No books found'
+                    except requests.RequestException:
+                        pass
                 response.close()
                 error = HttpError(status)
+                error.empty_catalog = empty_catalog
                 error.retry_after = retry_after_seconds(response.headers.get('Retry-After'))
                 raise error
             return response, url
         raise ClientError('Too many redirects')
 
     def read_feed(self, url):
-        response, final_url = self.get(url)
+        try:
+            response, final_url = self.get(url)
+        except HttpError as exc:
+            if getattr(exc, 'empty_catalog', False):
+                return b'<feed xmlns="http://www.w3.org/2005/Atom"><id>calibre-all:title</id></feed>', url
+            raise
         try:
             chunks, size = [], 0
             for chunk in response.iter_content(65536):
@@ -220,6 +235,17 @@ class Client:
                 self.discovery_message = 'OPDS discovery endpoint returned 404; using configured search template'
                 return fallback
             searches, libraries = catalog_links(xml, final_url)
+            if self.on_libraries:
+                advertised = []
+                for link in libraries + searches:
+                    self.check_url(link)
+                    identifier = parse_qs(urlsplit(link).query).get('library_id', [''])[0]
+                    if identifier:
+                        advertised.append(identifier)
+                default_id = (parse_qs(urlsplit(searches[0]).query).get('library_id', [''])[0]
+                              if len(searches) == 1 and not self.library.explicit_id else None)
+                self.advertised_library_ids.update(advertised)
+                self.on_libraries(sorted(self.advertised_library_ids), default_id)
             if self.library.explicit_id:
                 searches = [template for template in searches if
                             parse_qs(urlsplit(template).query).get('library_id', [self.library.library_id])[0]
@@ -244,6 +270,10 @@ class Client:
                 ids = sorted({parse_qs(urlsplit(link).query).get('library_id', [''])[0]
                               for link in searches + libraries} - {''})
                 choices = ', '.join(repr(value) for value in ids) or 'unspecified IDs'
+                if self.on_libraries and not self.library.explicit_id and libraries:
+                    url = next((link for link in libraries if parse_qs(urlsplit(link).query).get('library_id') == [ids[0]]), libraries[0])
+                    self.check_url(url)
+                    continue
                 raise ClientError(f'Multiple library catalogs advertised ({choices}); '
                                   'select one with ?library_id=ID in libraries.txt')
             if libraries:

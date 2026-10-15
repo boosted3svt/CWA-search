@@ -72,7 +72,7 @@ https://books.example.org
 http://192.168.1.22:8080?library_id=My_Library
 ```
 
-Bare `HOST:PORT` entries use HTTP. The app discovers the default library ID when possible; use `?library_id=...` to select a particular library. Lines beginning with `#` are comments. Duplicate entries are removed automatically. Do not put credentials in URLs.
+Bare `HOST:PORT` entries use HTTP. A bare server address discovers and scans all advertised libraries separately. Use `?library_id=...` to scan only that library. Discovered IDs are stored in `state/catalogs/servers.json`, not appended to your text file. Each library has its own catalog, count check, covers, and health; the GUI combines their search results. Libraries on the same configured server are scanned sequentially, while different server entries use the parallel workers. Lines beginning with `#` are comments. Duplicate entries are removed automatically. Do not put credentials in URLs.
 
 In `config.json`, change these existing settings:
 
@@ -120,7 +120,7 @@ Completed metadata becomes searchable before covers finish. Missing covers use a
 
 Repeated connectivity failures can retire a library, removing its address and cached data. The default scan threshold is three failures, counted at most once per library per refresh interval; successful metadata scans reset that counter. Ebook download timeouts have a separate counter. Authentication, certificate, catalog compatibility errors, and the overall scan time limit do not trigger scan retirement. Use **Retired servers** to inspect or restore automatically retired sources.
 
-Deleting a library from `libraries.txt` also removes its cached metadata and unshared covers. Downloaded ebooks are preserved.
+Deleting a bare server entry from `libraries.txt` removes all its discovered libraries and their cached metadata and unshared covers. A retired sub-library is excluded independently; the bare server entry is removed automatically only when every advertised library has been retired. The GUI separates server counts from discovered library counts. Downloaded ebooks are preserved.
 
 ## Start, stop, and inspect
 

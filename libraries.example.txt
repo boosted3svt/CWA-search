@@ -1,4 +1,5 @@
 # Copy to libraries.txt, then add libraries you are authorized to access.
-# Bare HOST:PORT or HTTP(S) URL; optional library_id per server.
+# Bare HOST:PORT or HTTP(S) URL scans all advertised libraries.
+# Add ?library_id=ID to select only one library.
 # 127.0.0.1:8080
 # http://127.0.0.1:8080?library_id=Calibre_Library

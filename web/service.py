@@ -164,6 +164,9 @@ class Service:
                 continue
             self.event(key, f'[{index}/{len(libraries)}] Searching {library.url}')
             client = None if settings.catalog_cache_enabled else make_client(settings, library)
+            if client:
+                from calibre.servers import search_discovery
+                client.on_libraries = search_discovery(settings, library, libraries)
             entry = {}
             try:
                 if settings.catalog_cache_enabled:

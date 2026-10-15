@@ -1,5 +1,6 @@
 """Persistent lifecycle and timeout state; never stores authentication values."""
 from datetime import datetime, timezone
+from dataclasses import replace
 import hashlib
 import json
 import re
@@ -49,19 +50,21 @@ class LibraryState:
 
     def new_entry(self, line, library):
         return {'line': line, 'source': library.url, 'library_id': library.library_id,
-                'explicit_id': library.explicit_id, 'timeout_count': 0, 'scan_failure_count': 0, 'generation': uuid.uuid4().hex}
+                'explicit_id': library.explicit_id, 'parent_url': library.parent_url, 'timeout_count': 0, 'scan_failure_count': 0, 'generation': uuid.uuid4().hex}
 
     def remove_entry(self, data, key, reason):
         entry = data['active'].pop(key)
         record = {**entry, 'id': uuid.uuid4().hex, 'key': key, 'retired_at': now(), 'reason': reason}
         data['history'].append(record)
         data['pending'][key] = record
-        self.report(f'Removed {entry["source"]}: {reason}; {entry["timeout_count"]} download timeouts; {entry.get("scan_failure_count", 0)} connectivity scan failures')
+        self.report(f'Removed {entry["source"]} [library {entry["library_id"] or "default"}]: {reason}; {entry["timeout_count"]} download timeouts; {entry.get("scan_failure_count", 0)} connectivity scan failures')
 
     def reconcile(self):
         with state_lock(self.gate):
-            configured = self.configured()
             data = self.load()
+            from .servers import reactivate_readded_servers
+            reactivate_readded_servers(self.settings, data['active'], data['pending'])
+            configured = self.configured()
             # Adopt old manifest entries on upgrade, including absent libraries.
             from .cache import CatalogStore
             for key, entry in CatalogStore(self.directory).manifest()['libraries'].items():
@@ -75,6 +78,8 @@ class LibraryState:
                 if library.library_id and library_key(explicit) == key:
                     library = explicit
                 line = source + ('?' + urlencode({'library_id': library.library_id}) if library.explicit_id else '')
+                if key in configured:
+                    line, library = configured[key]
                 data['active'][key] = self.new_entry(line, library)
             # An interrupted first scan can have a checkpoint but no manifest entry.
             for cursor in (self.directory / 'checkpoints').glob('*/cursor.json'):
@@ -89,10 +94,14 @@ class LibraryState:
                 if library_key(library) != key:
                     raise ValueError('Invalid library identity in checkpoint')
                 line = library.url + ('?' + urlencode({'library_id': library.library_id}) if library.explicit_id else '')
+                if key in configured:
+                    line, library = configured[key]
                 data['active'][key] = self.new_entry(line, library)
             for key in list(data['active']):
                 if key not in configured:
-                    self.remove_entry(data, key, 'manual-removal')
+                    raw_sources = {lib.url for _, lib in self.settings.raw_libraries()}
+                    reason = 'library-unadvertised' if data['active'][key].get('parent_url') and data['active'][key]['source'] in raw_sources else 'manual-removal'
+                    self.remove_entry(data, key, reason)
             for key, (line, library) in configured.items():
                 if key not in data['active'] and key not in data['pending']:
                     data['active'][key] = self.new_entry(line, library)
@@ -158,6 +167,15 @@ class LibraryState:
                     self.report(f'Purged cached catalog, checkpoints, and {len(candidates - keep)} unshared covers for {source}')
 
     def remove_configured(self, key):
+        from .servers import exclude
+        selection = self.configured().get(key)
+        if selection:
+            library = selection[1]
+            handled, remove_server = exclude(self.settings, library)
+            if handled and not remove_server:
+                return
+            if handled:
+                key = library_key(replace(library, library_id='', explicit_id=False, parent_url=''))
         path = Path(self.settings.libraries_file)
         with state_lock(path):
             original = path.read_text()
@@ -236,6 +254,8 @@ class LibraryState:
                        ((all_retired and item['reason'] in ('download-timeouts', 'scan-connectivity')) or item['id'] == record_id)]
             if not records:
                 raise ValueError('No retired entries selected')
+            if any(item['reason'] == 'library-unadvertised' for item in records):
+                raise ValueError('Library no longer advertised; refresh its server to discover it again')
             if any(item['key'] in data['pending'] for item in records):
                 raise ValueError('A removed scan is still stopping; retry restoration shortly')
             path = Path(self.settings.libraries_file)
@@ -244,9 +264,14 @@ class LibraryState:
                 configured = self.configured()
                 additions = []
                 for item in records:
+                    from .servers import restore_selection
+                    restore_selection(self.settings, item)
                     if item['key'] not in configured:
-                        additions.append(item['line'])
-                        library = self.settings.library(item['line'])
+                        parent_present = any(lib.url == item['source'] and not lib.explicit_id for _, lib in self.settings.raw_libraries())
+                        if not parent_present and item['line'] not in additions:
+                            additions.append(item['line'])
+                        library = replace(self.settings.library(item['line']), library_id=item['library_id'],
+                                          explicit_id=item['explicit_id'], parent_url=item.get('parent_url',''))
                         data['active'][item['key']] = self.new_entry(item['line'], library)
                         configured[item['key']] = (item['line'], library)
                     else:
