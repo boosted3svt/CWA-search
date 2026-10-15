@@ -108,6 +108,8 @@ You can close the terminal. The container runs in the background and restarts af
 3. **Check the title, author, and cover.** Select an available format and download the book. Files are saved in your configured server folder, with readable title and author names.
 4. **Check the result.** A green check indicates a saved download. A red X indicates a failed attempt; use **Find another server** to try another source. **Include previous attempts** allows deliberate retries of previously attempted formats.
 
+Refreshes compare the remote book count with the saved catalog when a usable count can be established from the first and last pages. Equal counts reuse metadata; changed or unavailable counts trigger a metadata scan. With unchanged metadata, a complete set of saved covers also skips cover downloads. Same-count book replacements and metadata-only edits will not be detected by this shortcut.
+
 Completed metadata becomes searchable before covers finish. Missing covers use a shared placeholder. You can search during a refresh.
 
 **Searchable catalogs** counts libraries with saved metadata, including older catalogs retained after a failed refresh. It is separate from the current batch's success/failure counts.

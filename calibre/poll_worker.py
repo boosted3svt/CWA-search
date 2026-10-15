@@ -7,7 +7,7 @@ import tempfile
 import time
 from config import Settings
 from .client import Client, Library, classify_failure
-from .catalog import full_catalog
+from .catalog import full_catalog, catalog_count
 from .checkpoint import Checkpoint
 from .images import fetch_image, image_type
 from .state import atomic_text
@@ -55,23 +55,55 @@ def run_library(settings, library, key, covers_only=False, report=emit):
     client = Client(library, timeout=settings.timeout, retries=settings.retries,
                     auto_discover=True, opds_path=settings.opds_path)
     try:
+        reuse = False
         if covers_only:
             books, entry = CatalogStore(settings.catalog_cache_dir).read(library)
             if books is None:
                 raise ValueError('No complete catalog yet; refresh metadata first')
             report('Using saved metadata; no catalog requests', phase='covers', count=0)
         else:
-            report('Reading catalog pages (resuming saved pages if available)', phase='metadata', count=0)
-            books = full_catalog(client, settings.catalog_max_pages, settings.catalog_max_books,
-                                 pause=lambda: time.sleep(settings.catalog_request_delay),
-                                 checkpoint=checkpoint,
-                                 progress=lambda count: report(f'{count} books read', phase='metadata', count=count))
-            report(f'Metadata complete: {len(books)} books', phase='metadata-complete', count=len(books))
+            books, entry = CatalogStore(settings.catalog_cache_dir).read(library)
+            reuse = False
+            pending = {}
+            if checkpoint.cursor.exists():
+                try:
+                    pending = json.loads(checkpoint.cursor.read_text())
+                except (OSError, ValueError):
+                    pending = {}
+            resume_complete = pending.get('complete') and entry.get('covers_pending')
+            if books is not None and not resume_complete:
+                report('Checking remote book count against saved metadata', phase='metadata', count=0)
+                remote_count = catalog_count(client, pause=lambda: time.sleep(settings.catalog_request_delay))
+                reuse = remote_count == len(books) if remote_count is not None else False
+                if reuse:
+                    report(f'Book count unchanged: {remote_count}; reusing saved metadata',
+                           phase='metadata-unchanged', count=remote_count)
+                else:
+                    if remote_count is not None and pending.get('complete'):
+                        checkpoint.clear()
+                    report(f'Book count {remote_count if remote_count is not None else "unavailable"}; saved {len(books)}; scanning metadata', phase='metadata', count=0)
+            if not reuse:
+                report('Reading catalog pages (resuming saved pages if available)', phase='metadata', count=0)
+                books = full_catalog(client, settings.catalog_max_pages, settings.catalog_max_books,
+                                     pause=lambda: time.sleep(settings.catalog_request_delay),
+                                     checkpoint=checkpoint,
+                                     progress=lambda count: report(f'{count} books read', phase='metadata', count=count))
+                report(f'Metadata complete: {len(books)} books', phase='metadata-complete', count=len(books))
         if settings.catalog_cache_covers or covers_only:
             directory = Path(settings.catalog_cache_dir) / 'covers'
             candidates = [book for book in books if book.cover_url]
             total = len(candidates)
             fetched = reused = failed = 0
+            # Only covers belonging to these book records count; unrelated files
+            # cannot conceal missing covers, and books without image links need none.
+            expected = {book.key for book in candidates}
+            available = {path.stem for path in directory.glob('*.img')
+                         if path.stem in expected and path.is_file() and path.stat().st_size > 0} if reuse else set()
+            if reuse and all(book.key in available for book in candidates):
+                report(f'All {total} expected covers already saved; skipping cover downloads',
+                       phase='covers-complete', count=total, total=total, failed=0, fetched=0, reused=total)
+                report('Worker finished', phase='complete', success=True)
+                return
             report(f'Fetching missing covers: 0/{total}', phase='covers', count=0, total=total)
             last_report = time.monotonic()
             for index, book in enumerate(candidates, 1):

@@ -318,6 +318,21 @@ class CatalogManager:
                         break
                 else:
                     self.event(f'{library.url}: {item["message"]}')
+                    if item.get('phase') == 'metadata-unchanged' and not covers_only:
+                        with state_lock(lifecycle.gate):
+                            if not lifecycle.allowed(library, generation):
+                                raise ScanCancelled('Library removed during count check')
+                            store = CatalogStore(settings.catalog_cache_dir)
+                            if not store.entry(library).get('snapshot'):
+                                raise ClientError('Saved catalog disappeared during count check')
+                            store.update(library, {'last_success': now(), 'error': None,
+                                'refresh_in_progress': False, 'failure_category': None,
+                                'retry_not_before': None, 'temporary_failure_count': 0,
+                                'covers_pending': settings.catalog_cache_covers,
+                                'covers_in_progress': settings.catalog_cache_covers})
+                        lifecycle.scan_outcome(library, success=True)
+                        with self.lock:
+                            self.activities[key]['metadata_published'] = True
                     if item.get('phase') == 'metadata-complete' and not covers_only:
                         published = self.publish_metadata(settings, library, generation)
                         if published:
