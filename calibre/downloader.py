@@ -68,6 +68,19 @@ def validate(path, fmt):
         if not records or offset < 78 + records * 8 or offset + 20 > path.stat().st_size:
             raise DownloadError('Invalid MOBI record table')
         with open(path, 'rb') as handle:
+            handle.seek(78)
+            table = handle.read(records * 8)
+            if len(table) != records * 8:
+                raise DownloadError('Incomplete MOBI record table')
+            offsets = [struct.unpack_from('>I', table, index * 8)[0] for index in range(records)]
+            size = path.stat().st_size
+            if any(value < 78 + records * 8 or value > size for value in offsets):
+                raise DownloadError('MOBI record points outside the file')
+            if offsets != sorted(offsets):
+                raise DownloadError('MOBI record offsets are not ordered')
+            first_end = offsets[1] if records > 1 else size
+            if first_end < offset + 20:
+                raise DownloadError('Incomplete MOBI first record')
             handle.seek(offset + 16)
             if handle.read(4) != b'MOBI':
                 raise DownloadError('Missing MOBI record header')
@@ -114,11 +127,13 @@ def download(client, book, acquisition, destination, max_bytes=100_000_000, on_w
         validate(temporary, acquisition.format)
         if acquisition.length is not None and size != acquisition.length:
             message = (f'OPDS advertised {acquisition.length} bytes; downloaded {size} bytes')
-            if acquisition.format != 'epub':
+            if acquisition.format not in ('epub','mobi','azw','azw3'):
                 raise DownloadError(message + '; download size differs from the OPDS acquisition length')
-            # Calibre can update EPUB metadata during delivery. The catalog length
-            # may describe the stored file, not the complete delivered ZIP.
-            warning = message + '. EPUB ZIP integrity and container checks passed; keeping the file.'
+            # Calibre can update ebook metadata during delivery. OPDS length
+            # describes the stored file; HTTP length describes this response.
+            checks = ('EPUB ZIP integrity and container' if acquisition.format == 'epub'
+                      else acquisition.format.upper()+' record-table and header')
+            warning = message + '. '+checks+' checks passed; keeping the file.'
             logging.getLogger(__name__).warning(warning)
             if on_warning:
                 on_warning(warning)

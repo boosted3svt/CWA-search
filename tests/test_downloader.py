@@ -36,8 +36,8 @@ def test_size_limits_and_advertised_length(tmp_path, book, mobi):
     with pytest.raises(DownloadError, match='size limit'):
         download(client(mobi), book, book.acquisitions[1], tmp_path, max_bytes=20)
     book.acquisitions[1].length = 900
-    with pytest.raises(DownloadError, match='OPDS'):
-        download(client(mobi), book, book.acquisitions[1], tmp_path)
+    path = download(client(mobi), book, book.acquisitions[1], tmp_path)
+    assert path.read_bytes() == mobi
 
 
 def test_epub_validation(tmp_path, book):
@@ -123,3 +123,34 @@ def test_unicode_filename_fits_filesystem_limit(book):
     book.title = '書' * 100
     book.authors = ['作' * 100]
     assert len(book_filename(book, 'epub').encode('utf-8')) <= 255
+
+
+@pytest.mark.parametrize('fmt',['mobi','azw','azw3'])
+@pytest.mark.parametrize('delta',[-100,100])
+def test_valid_palm_download_with_stale_catalog_size_is_saved_with_warning(tmp_path,book,mobi,fmt,delta):
+    acquisition=replace(book.acquisitions[1],format=fmt,length=len(mobi)+delta)
+    book.acquisitions=[acquisition]
+    warnings=[]
+    path=download(client(mobi,{'Content-Length':str(len(mobi))}),book,acquisition,tmp_path,on_warning=warnings.append)
+    assert path.read_bytes()==mobi
+    assert warnings and 'record-table and header checks passed; keeping the file' in warnings[0]
+
+
+def test_mobi_http_length_mismatch_is_still_rejected(tmp_path,book,mobi):
+    book.acquisitions[1].length=len(mobi)+100
+    with pytest.raises(DownloadError,match='incomplete'):
+        download(client(mobi,{'Content-Length':str(len(mobi)+1)}),book,book.acquisitions[1],tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize('offsets',[(100,9999),(140,120),(100,110)])
+def test_invalid_palm_record_table_rejected_despite_stale_catalog_length(tmp_path,book,mobi,offsets):
+    import struct
+    data=bytearray(mobi)
+    struct.pack_into('>H',data,76,2)
+    for index,offset in enumerate(offsets):struct.pack_into('>I',data,78+index*8,offset)
+    data[offsets[0]+16:offsets[0]+20]=b'MOBI'
+    book.acquisitions[1].length=999
+    with pytest.raises(DownloadError):
+        download(client(bytes(data)),book,book.acquisitions[1],tmp_path)
+    assert not list(tmp_path.iterdir())
