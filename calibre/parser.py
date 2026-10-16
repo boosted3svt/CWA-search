@@ -124,3 +124,15 @@ def parse_feed(xml: bytes, feed_url: str, source: str, library_id: str = '', inc
             next_url = urljoin(feed_url, link.get('href'))
             break
     return books, next_url
+
+
+def library_names(xml):
+    root = atom_root(xml)
+    names = {}
+    for entry in root.findall(ATOM+'entry'):
+        identifier = entry.findtext(ATOM+'id', '')
+        if identifier.startswith('calibre-library:'):
+            identifier = identifier[len('calibre-library:'):]
+            title = entry.findtext(ATOM+'title', '').strip()
+            names[identifier] = title.replace('：',':').split(':',1)[-1].strip() or identifier
+    return names

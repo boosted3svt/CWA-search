@@ -56,8 +56,19 @@ def run_library(settings, library, key, covers_only=False, report=emit):
                     auto_discover=True, opds_path=settings.opds_path)
     client.on_libraries = lambda ids, default: report(
         'Advertised libraries: '+', '.join(sorted(set(ids))), phase='libraries-discovered',
-        library_ids=sorted(set(ids)), default_library_id=default)
+        library_ids=sorted(set(ids)), default_library_id=default, library_names=getattr(client,'library_names',{}))
     try:
+        from .language import enforce_language
+        from .servers import registry
+        if not covers_only:
+            # Always enumerate before considering a saved complete checkpoint.
+            # In particular, an empty saved default must not hide its siblings.
+            client.discover_search()
+            enforce_language(settings, library, client.resolved_library_id, getattr(client,'library_names',{}))
+        else:
+            info = registry(settings).get(library.url, {})
+            identifier = library.library_id if library.explicit_id else info.get('default_id',library.library_id)
+            enforce_language(settings,library,identifier,info.get('names',{}))
         reuse = False
         if covers_only:
             books, entry = CatalogStore(settings.catalog_cache_dir).read(library)
@@ -99,40 +110,55 @@ def run_library(settings, library, key, covers_only=False, report=emit):
             directory = Path(settings.catalog_cache_dir) / 'covers'
             candidates = [book for book in books if book.cover_url]
             total = len(candidates)
-            fetched = reused = failed = 0
-            # Only covers belonging to these book records count; unrelated files
-            # cannot conceal missing covers, and books without image links need none.
+            from .cover_jobs import CoverJob
+            job = CoverJob(settings,key,candidates)
             expected = {book.key for book in candidates}
             available = {path.stem for path in directory.glob('*.img')
                          if path.stem in expected and path.is_file() and path.stat().st_size > 0} if reuse else set()
             if reuse and all(book.key in available for book in candidates):
+                job.failures.clear()
+                job.reason_counts.clear()
+                job.counts.update(fetched=0,reused=total,failed=0,deferred=0)
+                job.save(total,complete=True)
                 report(f'All {total} expected covers already saved; skipping cover downloads',
-                       phase='covers-complete', count=total, total=total, failed=0, fetched=0, reused=total)
+                       phase='covers-complete', count=total, total=total, failed=0, fetched=0, reused=total,deferred=0)
                 report('Worker finished', phase='complete', success=True)
                 return
-            report(f'Fetching missing covers: 0/{total}', phase='covers', count=0, total=total)
-            last_report = time.monotonic()
-            for index, book in enumerate(candidates, 1):
-                if cover_available(directory, book):
-                    reused += 1
-                    metadata = directory / (book.key + '.json')
-                    if not metadata.exists():
-                        atomic_text(metadata, json.dumps({'url': book.cover_url}))
+            report(f'Fetching missing covers: resuming at {job.index}/{total}', phase='covers', count=job.index,total=total)
+            last_report=time.monotonic()
+            for offset in range(job.index,total):
+                book=candidates[offset]
+                if cover_available(directory,book):
+                    job.counts['reused']+=1
+                    job.available(book)
+                    metadata=directory/(book.key+'.json')
+                    if not metadata.exists():atomic_text(metadata,json.dumps({'url':book.cover_url}))
+                elif job.deferred(book):
+                    job.counts['failed']+=1
+                    job.counts['deferred']+=1
                 else:
                     time.sleep(settings.catalog_request_delay)
                     try:
-                        body, _ = fetch_image(client, book.cover_url)
-                        save_cover(directory, book, body)
-                        fetched += 1
-                    except Exception:
-                        failed += 1
-                if index % 20 == 0 or index == total or time.monotonic() - last_report >= 5:
-                    report(f'Covers: {index}/{total} checked; {fetched} fetched, {reused} reused, {failed} unavailable',
-                           phase='covers', count=index, total=total, fetched=fetched, reused=reused, failed=failed)
-                    last_report = time.monotonic()
-            report(f'Covers complete: {fetched} fetched, {reused} reused, {failed} unavailable',
-                   phase='covers-complete', count=total, total=total, failed=failed,
-                   fetched=fetched, reused=reused)
+                        body,_=fetch_image(client,book.cover_url)
+                        save_cover(directory,book,body)
+                        job.counts['fetched']+=1
+                        job.available(book)
+                    except OSError as error:
+                        from .client import ClientError
+                        raise ClientError('Unable to save cover cache; check disk space and permissions') from error
+                    except Exception as error:
+                        job.counts['failed']+=1
+                        job.unavailable(book,error)
+                index=offset+1
+                if index % 20 == 0 or index==total or time.monotonic()-last_report>=5:
+                    job.save(index)
+                    counts=job.counts
+                    report(f'Covers: {index}/{total} checked; {counts["fetched"]} fetched, {counts["reused"]} reused, {counts["failed"]} unavailable ({counts["deferred"]} deferred by retry backoff)',
+                           phase='covers',count=index,total=total,**counts,unavailable_reasons=job.reasons())
+                    last_report=time.monotonic()
+            job.save(total,complete=True)
+            report(f'Covers complete: {job.counts["fetched"]} fetched, {job.counts["reused"]} reused, {job.counts["failed"]} unavailable; reasons: {job.reasons()}',
+                   phase='covers-complete',count=total,total=total,**job.counts,unavailable_reasons=job.reasons())
         report('Worker finished', phase='complete', success=True)
     finally:
         client.close()

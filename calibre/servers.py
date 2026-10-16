@@ -14,7 +14,7 @@ def registry(settings):
     return json.loads(path.read_text()) if path.exists() else {}
 
 
-def advertise(settings, source, ids, default_id=None, authoritative=True):
+def advertise(settings, source, ids, default_id=None, authoritative=True, names=None):
     ids = sorted(set(ids) - {''})
     if not ids:
         return
@@ -27,7 +27,8 @@ def advertise(settings, source, ids, default_id=None, authoritative=True):
         default_id = default_id or previous.get('default_id') or ids[0]
         ids = sorted(set(ids + [default_id]))
         data[source] = {'ids': ids, 'default_id': default_id,
-                        'excluded': previous.get('excluded', [])}
+                        'excluded': previous.get('excluded', []),
+                        'names': {**previous.get('names', {}), **(names or {})}}
         atomic_text(path, json.dumps(data, indent=2))
 
 

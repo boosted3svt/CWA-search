@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import time
 from urllib.parse import quote, urlencode, urljoin, urlsplit, urlunsplit, parse_qs, parse_qsl
 import requests
-from .parser import parse_feed, catalog_links, FeedError
+from .parser import parse_feed, catalog_links, FeedError, library_names
 
 
 class ClientError(RuntimeError):
@@ -112,6 +112,7 @@ class Client:
         self.discovery_message = ''
         self.on_libraries = None
         self.advertised_library_ids = set()
+        self.library_names = {}
 
     def close(self):
         self.session.close()
@@ -235,6 +236,7 @@ class Client:
                 self.discovery_message = 'OPDS discovery endpoint returned 404; using configured search template'
                 return fallback
             searches, libraries = catalog_links(xml, final_url)
+            self.library_names.update(library_names(xml))
             if self.on_libraries:
                 advertised = []
                 for link in libraries + searches:

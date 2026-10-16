@@ -1,5 +1,5 @@
 """JSON settings and line-delimited library URLs; no credentials stored on disk."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 import os
@@ -40,6 +40,10 @@ class Settings:
     catalog_scan_concurrency: int = 2
     library_download_timeout_limit: int = 3
     library_scan_failure_limit: int = 3
+    library_language_failure_limit: int = 3
+    library_language_overrides: dict = field(default_factory=dict)
+    reject_unknown_library_language: bool = False
+    catalog_cover_failure_retry_hours: float = 24
 
     @classmethod
     def load(cls, filename):
@@ -74,6 +78,14 @@ class Settings:
             raise ValueError('library_download_timeout_limit must be a nonnegative integer (0 disables retirement)')
         if type(settings.library_scan_failure_limit) is not int or settings.library_scan_failure_limit < 0:
             raise ValueError('library_scan_failure_limit must be a nonnegative integer (0 disables scan retirement)')
+        if type(settings.library_language_failure_limit) is not int or settings.library_language_failure_limit < 0:
+            raise ValueError('library_language_failure_limit must be a nonnegative integer')
+        if type(settings.reject_unknown_library_language) is not bool:
+            raise ValueError('reject_unknown_library_language must be true or false')
+        if not isinstance(settings.library_language_overrides, dict) or any(not isinstance(k,str) or v not in ('english','non-english') for k,v in settings.library_language_overrides.items()):
+            raise ValueError('library_language_overrides must map library IDs or server?library_id=ID to english or non-english')
+        if not math.isfinite(settings.catalog_cover_failure_retry_hours) or settings.catalog_cover_failure_retry_hours <= 0:
+            raise ValueError('catalog_cover_failure_retry_hours must be finite and positive')
         return settings
 
     def library(self, line):

@@ -156,9 +156,14 @@ class Service:
             raise ValueError('Add library URLs to libraries.txt on the server first.')
         results, failures, successes = [], 0, 0
         cache_dates = {}
+        from calibre.library_state import LibraryState, library_key
+        policy = LibraryState(settings).load()['active']
         for index, (line, library) in enumerate(libraries, 1):
             if self.snapshot(key)['cancelled']:
                 break
+            if policy.get(library_key(library),{}).get('scan_category') == 'language':
+                self.event(key, f'Skipping {library.url}: library-name language policy')
+                continue
             if library.url == data.get('skip_source'):
                 self.event(key, f'Skipping {library.url} for this search after the failed download')
                 continue

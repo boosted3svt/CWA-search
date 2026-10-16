@@ -110,7 +110,7 @@ You can close the terminal. The container runs in the background and restarts af
 
 Refreshes compare the remote book count with the saved catalog when a usable count can be established from the first and last pages. Equal counts reuse metadata; changed or unavailable counts trigger a metadata scan. With unchanged metadata, a complete set of saved covers also skips cover downloads. Same-count book replacements and metadata-only edits will not be detected by this shortcut.
 
-Completed metadata becomes searchable before covers finish. Missing covers use a shared placeholder. You can search during a refresh.
+Completed metadata becomes searchable before covers finish. Missing covers use a shared placeholder. Cover jobs save their position and continue after a timeout or restart. Unavailable images have recorded reasons and retry backoff: HTTP 404/410 waits at least seven days; other failures start at `catalog_cover_failure_retry_hours` (default 24 hours), increasing with repeated failures. **Fetch missing covers** respects this backoff. A new image URL bypasses the old failure record. You can search during a refresh.
 
 **Searchable catalogs** counts libraries with saved metadata, including older catalogs retained after a failed refresh. It is separate from the current batch's success/failure counts.
 
@@ -118,9 +118,17 @@ Completed metadata becomes searchable before covers finish. Missing covers use a
 - **Fetch missing covers:** use saved metadata to fetch missing covers without rescanning book lists.
 - **Stop refresh:** retain saved progress and pause automatic refresh for one interval, until a manual refresh, or until restart.
 
-Repeated connectivity failures can retire a library, removing its address and cached data. The default scan threshold is three failures, counted at most once per library per refresh interval; successful metadata scans reset that counter. Ebook download timeouts have a separate counter. Authentication, certificate, catalog compatibility errors, and the overall scan time limit do not trigger scan retirement. Use **Retired servers** to inspect or restore automatically retired sources.
+Repeated connectivity failures can retire a library, removing its address and cached data. The default scan threshold is three failures, counted at most once per library per refresh interval; successful metadata scans reset that counter. Ebook download timeouts have a separate counter. Authentication, certificate, catalog compatibility errors, and the overall scan time limit do not trigger connectivity retirement. Clear non-English library names have a separate `library_language_failure_limit` (default 3, 0 disables retirement), counted at most once per refresh interval. Those libraries are excluded from cached search while awaiting retirement; healthy siblings remain available. Use **Retired servers** to inspect or restore automatically retired sources.
 
 Deleting a bare server entry from `libraries.txt` removes all its discovered libraries and their cached metadata and unshared covers. A retired sub-library is excluded independently; the bare server entry is removed automatically only when every advertised library has been retired. The GUI separates server counts from discovered library counts. Downloaded ebooks are preserved.
+
+Library-name language checks recognize non-Latin lettering and common non-English library wording. They do not establish the language of the books. Ambiguous names such as “Calibre” are kept by default; `reject_unknown_library_language: true` also rejects uncertain names. To override a classification, add `library_language_overrides` to `config.json`, mapping a library ID—or a scoped `SERVER_URL?library_id=ID`—to `english` or `non-english`. For example:
+
+```json
+"library_language_overrides": {
+  "http://192.168.1.20:8080?library_id=My_Library": "english"
+}
+```
 
 ## Start, stop, and inspect
 

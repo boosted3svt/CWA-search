@@ -34,5 +34,9 @@
   "catalog_scan_concurrency": 2,
   "library_download_timeout_limit": 3,
   "library_scan_failure_limit": 3,
-  "verify_tls": true
+  "verify_tls": true,
+  "library_language_failure_limit": 3,
+  "library_language_overrides": {},
+  "reject_unknown_library_language": false,
+  "catalog_cover_failure_retry_hours": 24
 }

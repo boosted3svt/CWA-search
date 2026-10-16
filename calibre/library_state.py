@@ -50,7 +50,7 @@ class LibraryState:
 
     def new_entry(self, line, library):
         return {'line': line, 'source': library.url, 'library_id': library.library_id,
-                'explicit_id': library.explicit_id, 'parent_url': library.parent_url, 'timeout_count': 0, 'scan_failure_count': 0, 'generation': uuid.uuid4().hex}
+                'explicit_id': library.explicit_id, 'parent_url': library.parent_url, 'timeout_count': 0, 'scan_failure_count': 0, 'language_failure_count': 0, 'generation': uuid.uuid4().hex}
 
     def remove_entry(self, data, key, reason):
         entry = data['active'].pop(key)
@@ -156,6 +156,8 @@ class LibraryState:
                         atomic_text(store.index, json.dumps(manifest, indent=2))
                         for path in self.directory.glob(key + '_*.json'):
                             path.unlink(missing_ok=True)
+                        for suffix in ('.json','.jsonl'):
+                            (self.directory/'cover-jobs'/(key+suffix)).unlink(missing_ok=True)
                         checkpoint = self.directory / 'checkpoints' / key
                         if checkpoint.exists():
                             shutil.rmtree(checkpoint)
@@ -204,6 +206,8 @@ class LibraryState:
             entry['last_scan_outcome'] = now()
             if success:
                 entry['scan_failure_count'] = 0
+                entry['language_failure_count'] = 0
+                entry.pop('last_counted_language_failure', None)
                 entry.pop('last_counted_scan_failure', None)
             elif category == 'connectivity':
                 stamp = entry.get('last_counted_scan_failure')
@@ -217,6 +221,17 @@ class LibraryState:
                 # A server response breaks the sequence of unreachable scans.
                 entry['scan_failure_count'] = 0
                 entry.pop('last_counted_scan_failure', None)
+            if category == 'language':
+                stamp = entry.get('last_counted_language_failure')
+                attempt_time = datetime.fromisoformat(attempt_started) if attempt_started else datetime.now(timezone.utc)
+                elapsed = (attempt_time - datetime.fromisoformat(stamp)).total_seconds() if stamp else float('inf')
+                if elapsed >= self.settings.catalog_refresh_interval_hours * 3600:
+                    entry['language_failure_count'] = entry.get('language_failure_count',0) + 1
+                    entry['last_counted_language_failure'] = attempt_time.isoformat()
+                language_limit = self.settings.library_language_failure_limit
+                if language_limit and entry.get('language_failure_count',0) >= language_limit:
+                    self.remove_configured(key)
+                    self.remove_entry(data,key,'library-language')
             limit = self.settings.library_scan_failure_limit
             if category == 'connectivity' and limit and entry.get('scan_failure_count', 0) >= limit:
                 self.remove_configured(key)
@@ -251,7 +266,7 @@ class LibraryState:
         with state_lock(self.gate):
             data = self.load()
             records = [item for item in data['history'] if not item.get('restored_at') and
-                       ((all_retired and item['reason'] in ('download-timeouts', 'scan-connectivity')) or item['id'] == record_id)]
+                       ((all_retired and item['reason'] in ('download-timeouts', 'scan-connectivity', 'library-language')) or item['id'] == record_id)]
             if not records:
                 raise ValueError('No retired entries selected')
             if any(item['reason'] == 'library-unadvertised' for item in records):
@@ -281,6 +296,8 @@ class LibraryState:
                         else:
                             data['active'][item['key']]['timeout_count'] = 0
                             data['active'][item['key']]['scan_failure_count'] = 0
+                            data['active'][item['key']]['language_failure_count'] = 0
+                            data['active'][item['key']].pop('last_counted_language_failure', None)
                             data['active'][item['key']].pop('last_counted_scan_failure', None)
                     item['restored_at'] = now()
                 if additions:

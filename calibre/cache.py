@@ -208,7 +208,8 @@ class CatalogManager:
                             'error': entry.get('error'), 'cached': bool(entry.get('snapshot')),
                             'covers_error': entry.get('covers_error'),
                             'covers_pending': entry.get('covers_pending', False),
-                            'covers_failed': entry.get('covers_failed'),
+                            'covers_failed': entry.get('covers_failed'), 'covers_deferred': entry.get('covers_deferred',0),
+                            'covers_unavailable_reasons': entry.get('covers_unavailable_reasons',{}),
                             'stale': is_stale(entry, settings.catalog_refresh_interval_hours)})
         lifecycle = LibraryState(settings)
         counters = lifecycle.load()['active']
@@ -216,6 +217,11 @@ class CatalogManager:
             health = counters.get(library_key(library), {})
             item['download_timeout_count'] = health.get('timeout_count', 0)
             item['scan_failure_count'] = health.get('scan_failure_count', 0)
+            item['language_failure_count'] = health.get('language_failure_count', 0)
+            item['policy_reason'] = health.get('scan_detail') if health.get('scan_category') == 'language' else None
+            if item['policy_reason']:
+                item['stored_book_count'] = item['book_count']
+                item['book_count'], item['cached'] = 0, False
             item['health'] = health.get('scan_category', 'unknown')
             item['last_scan_outcome'] = health.get('last_scan_outcome')
         with self.lock:
@@ -238,6 +244,7 @@ class CatalogManager:
                 'covers_enabled': settings.catalog_cache_covers,
                 'retired': lifecycle.load()['history'],
                 'scan_failure_limit': settings.library_scan_failure_limit,
+                'language_failure_limit': settings.library_language_failure_limit,
                 'download_timeout_limit': settings.library_download_timeout_limit}
 
     def refresh(self, force=False, covers_only=False):
@@ -324,7 +331,7 @@ class CatalogManager:
                     if item.get('phase') == 'libraries-discovered' and (not library.explicit_id or library.parent_url):
                         from .servers import advertise
                         advertise(settings, library.url, item.get('library_ids', []),
-                                  item.get('default_library_id'), authoritative=not library.explicit_id)
+                                  item.get('default_library_id'), authoritative=not library.explicit_id, names=item.get('library_names', {}))
                         LibraryState(settings, self.event).reconcile()
                         with self.lock:
                             if not library.explicit_id:
@@ -352,8 +359,17 @@ class CatalogManager:
                             lifecycle.scan_outcome(library, success=True)
                         with self.lock:
                             self.activities[key]['metadata_published'] = published
+                    if item.get('phase') == 'covers' and 'unavailable_reasons' in item:
+                        with state_lock(lifecycle.gate):
+                            if lifecycle.allowed(library, generation):
+                                CatalogStore(settings.catalog_cache_dir).update(library, {
+                                    'covers_checked': item.get('count',0), 'covers_failed': item.get('failed',0),
+                                    'covers_deferred': item.get('deferred',0),
+                                    'covers_unavailable_reasons': item['unavailable_reasons']})
                     if item.get('phase') == 'covers-complete':
-                        cover_summary = {name: item.get(name, 0) for name in ('total', 'failed', 'fetched', 'reused')}
+                        cover_summary = {name: item.get(name, 0) for name in ('total', 'failed', 'fetched', 'reused', 'deferred')}
+                    if item.get('phase') == 'covers-complete':
+                        cover_summary['unavailable_reasons'] = item.get('unavailable_reasons',{})
                     with self.lock:
                         self.activities[key].update({k: v for k, v in item.items()
                                             if k not in ('message', 'error', 'success')})
@@ -490,7 +506,8 @@ class CatalogManager:
                                 fields.update(refresh_in_progress=False, failure_category=None, retry_not_before=None, temporary_failure_count=0)
                             if covers_only or settings.catalog_cache_covers:
                                 fields.update(covers_last_success=now(), covers_failed=summary.get('failed', 0),
-                                              covers_checked=summary.get('total', 0))
+                                              covers_checked=summary.get('total', 0), covers_deferred=summary.get('deferred',0),
+                                              covers_unavailable_reasons=summary.get('unavailable_reasons',{}))
                             store.update(library, fields)
                             checkpoint = checkpoint_for(settings, library, key)
                             clear_checkpoint = not covers_only
@@ -507,16 +524,18 @@ class CatalogManager:
                         with self.lock:
                             self.batch[key] = 'succeeded'
                     except Exception as exc:
+                        category = 'cancelled' if isinstance(exc, ScanCancelled) else classify_failure(exc)
                         with self.lock:
                             self.batch[key] = 'cancelled' if isinstance(exc, ScanCancelled) else 'failed'
                             published = covers_only or self.activities.get(key, {}).get('metadata_published', False)
-                        if not published:
+                        if category == 'language':
+                            published = False
+                        if not published and category != 'language':
                             try:
                                 # A deadline can race delivery of the metadata-complete event.
                                 published = self.publish_metadata(settings, library)
                             except Exception:
                                 pass
-                        category = 'cancelled' if isinstance(exc, ScanCancelled) else classify_failure(exc)
                         if published and not covers_only:
                             lifecycle.scan_outcome(library, success=True)
                         elif not published:
@@ -531,6 +550,9 @@ class CatalogManager:
                                     fields['refresh_in_progress'] = False
                                 if not published:
                                     fields['failure_category'] = category
+                                    if category == 'language':
+                                        fields.update(covers_in_progress=False, refresh_in_progress=False,
+                                                      cover_job_only=False, last_attempt=started)
                                     from datetime import timedelta
                                     if category == 'temporary':
                                         attempts = store.entry(library).get('temporary_failure_count', 0) + 1

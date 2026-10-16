@@ -27,7 +27,7 @@ def multi_server():
             if identifier in state['broken']:
                 self.send_error(401);return
             if parsed.path=='/opds':
-                entries=''.join('<entry><title>Library: Same name</title><id>calibre-library:'+i+'</id><link type="application/atom+xml" href="/opds?library_id='+i+'"/></entry>' for i in state['ids'])
+                entries=''.join('<entry><title>Library: '+state.get('names',{}).get(i,'Same name')+'</title><id>calibre-library:'+i+'</id><link type="application/atom+xml" href="/opds?library_id='+i+'"/></entry>' for i in state['ids'])
                 body=('<feed xmlns="http://www.w3.org/2005/Atom"><link rel="search" href="/opds/search/{searchTerms}?library_id='+identifier+'"/><entry><title>By Title</title><link type="application/atom+xml" href="/opds/navcatalog/4f7469746c65?library_id='+identifier+'"/></entry>'+entries+'</feed>').encode()
             elif parsed.path.startswith('/opds/navcatalog/') or parsed.path.startswith('/opds/search/'):
                 if identifier in state['empty']:

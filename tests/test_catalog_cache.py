@@ -165,6 +165,8 @@ def test_cache_covers_is_local_and_bounded(tmp_path,book,monkeypatch):
     config.write_text('{"catalog_cache_enabled":true,"catalog_cache_covers":true,"catalog_request_delay":0}')
     (tmp_path/'libraries.txt').write_text(book.source+'\n')
     class Fake:
+        resolved_library_id = ''
+        def discover_search(self): pass
         def close(self): pass
     monkeypatch.setattr('calibre.poll_worker.Client',lambda *a,**k:Fake())
     monkeypatch.setattr('calibre.poll_worker.full_catalog',lambda *a,**k:[book])
