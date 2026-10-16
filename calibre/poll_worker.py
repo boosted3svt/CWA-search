@@ -153,7 +153,7 @@ def run_library(settings, library, key, covers_only=False, report=emit):
                 if index % 20 == 0 or index==total or time.monotonic()-last_report>=5:
                     job.save(index)
                     counts=job.counts
-                    report(f'Covers: {index}/{total} checked; {counts["fetched"]} fetched, {counts["reused"]} reused, {counts["failed"]} unavailable ({counts["deferred"]} deferred by retry backoff)',
+                    report(f'Covers: {index}/{total} checked; {counts["fetched"]} fetched, {counts["reused"]} reused, {counts["failed"]} unavailable ({counts["deferred"]} deferred by retry backoff); reasons: {job.reasons()}',
                            phase='covers',count=index,total=total,**counts,unavailable_reasons=job.reasons())
                     last_report=time.monotonic()
             job.save(total,complete=True)

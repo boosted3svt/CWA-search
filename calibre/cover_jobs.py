@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 from .state import atomic_text
 from .client import HttpError, classify_failure, is_timeout_error
+from .images import EmptyCoverResponse
 
 
 class CoverJob:
@@ -49,9 +50,10 @@ class CoverJob:
         previous=self.failures.get(book.key,{})
         attempts=previous.get('attempts',0)+1
         reason='http-'+str(error.status) if isinstance(error,HttpError) else ('timeout' if is_timeout_error(error) else classify_failure(error))
+        if isinstance(error,EmptyCoverResponse):reason='empty-response'
         if str(error) in ('Unsupported cover image','Cover exceeds size limit'):reason='invalid-image'
         hours=min(168,self.retry_hours*2**min(attempts-1,4))
-        if isinstance(error,HttpError) and error.status in (404,410):hours=max(hours,168)
+        if reason in ('empty-response','http-404','http-410'):hours=max(hours,168)
         entry={'key':book.key,'url':book.cover_url,'reason':reason,'attempts':attempts,
                'retry_at':time.time()+max(hours*3600,getattr(error,'retry_after',0))}
         if previous.get('reason'):self.reason_counts[previous['reason']]-=1

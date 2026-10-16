@@ -6,6 +6,7 @@ import pytest
 from calibre.cache import CatalogManager,CatalogStore,library_key,now
 from calibre.cover_jobs import CoverJob
 from calibre.client import HttpError
+from calibre.images import EmptyCoverResponse, fetch_image
 from calibre.language import library_language
 from calibre.poll_worker import run_library,checkpoint_for
 from config import Settings
@@ -71,7 +72,8 @@ def test_saved_complete_empty_default_still_discovers_sibling(tmp_path):
         finally:manager.close()
 
 
-def test_cover_cursor_and_backoff_avoid_repeating_first_failed_covers(tmp_path,book,monkeypatch):
+@pytest.mark.parametrize('failure',[HttpError(404),EmptyCoverResponse()])
+def test_cover_cursor_and_backoff_avoid_repeating_first_failed_covers(tmp_path,book,monkeypatch,failure):
     import calibre.poll_worker as worker
     settings=Settings.load(configure(tmp_path,[book.source],catalog_cache_covers=True))
     library=settings.libraries()[0][1]
@@ -83,13 +85,13 @@ def test_cover_cursor_and_backoff_avoid_repeating_first_failed_covers(tmp_path,b
     def interrupted(client,url):
         calls.append(url)
         if len(calls)==21:raise SystemExit('simulate terminated process')
-        raise HttpError(404)
+        raise failure
     monkeypatch.setattr(worker,'fetch_image',interrupted)
     with pytest.raises(SystemExit):run_library(settings,library,library_key(library),report=lambda *a,**k:None)
     job=CoverJob(settings,library_key(library),books)
     assert job.index==20 and len(job.failures)==20
     calls.clear()
-    def fail(client,url):calls.append(url);raise HttpError(404)
+    def fail(client,url):calls.append(url);raise failure
     monkeypatch.setattr(worker,'fetch_image',fail)
     run_library(settings,library,library_key(library),report=lambda *a,**k:None)
     assert len(calls)==20 and calls[0].endswith('/20')
@@ -97,7 +99,61 @@ def test_cover_cursor_and_backoff_avoid_repeating_first_failed_covers(tmp_path,b
     run_library(settings,library,library_key(library),report=lambda m,**f:events.append((m,f)))
     assert calls==[]
     assert events[-2][1]['deferred']==40
-    assert events[-2][1]['unavailable_reasons']=={'http-404':40}
+    reason='empty-response' if isinstance(failure,EmptyCoverResponse) else 'http-404'
+    assert events[-2][1]['unavailable_reasons']=={reason:40}
+    assert any('reasons:' in message and reason in message for message,_ in events)
+
+
+def test_empty_http_200_is_backed_off_until_retry_then_recovers(tmp_path,book,monkeypatch):
+    import calibre.poll_worker as worker
+    from calibre.client import Client, Library
+    from conftest import Response, Session
+    from test_web import PNG
+    settings=Settings.load(configure(tmp_path,[book.source],catalog_cache_covers=True))
+    library=settings.libraries()[0][1]
+    CatalogStore(settings.catalog_cache_dir).publish(library,[book],now())
+    session=Session([Response(b'',headers={'Content-Type':'image/jpeg','Content-Length':'0'}),
+                     Response(PNG,headers={'Content-Type':'image/png'})])
+    client=Client(library,session=session)
+    client.discover_search=lambda:None
+    monkeypatch.setattr(worker,'Client',lambda *a,**k:client)
+    monkeypatch.setattr(worker,'catalog_count',lambda *a,**k:1)
+    clock=[1000]
+    monkeypatch.setattr('calibre.cover_jobs.time.time',lambda:clock[0])
+    key=library_key(library)
+    events=[]
+    report=lambda m,**f:events.append((m,f))
+    run_library(settings,library,key,report=report)
+    failure=CoverJob(settings,key,[book]).failures[book.key]
+    assert failure['reason']=='empty-response'
+    assert failure['retry_at']==1000+7*24*3600
+    assert len(session.calls)==1
+    assert events[-2][1]['unavailable_reasons']=={'empty-response':1}
+    assert not (Path(settings.catalog_cache_dir)/'covers'/(book.key+'.img')).exists()
+    clock[0]+=24*3600
+    run_library(settings,library,key,covers_only=True,report=report)
+    assert len(session.calls)==1 and events[-2][1]['deferred']==1
+    changed=replace(book,cover_url=book.cover_url+'?updated=1')
+    assert not CoverJob(settings,key,[changed]).deferred(changed)
+    clock[0]=failure['retry_at']
+    run_library(settings,library,key,covers_only=True,report=report)
+    assert len(session.calls)==2
+    assert (Path(settings.catalog_cache_dir)/'covers'/(book.key+'.img')).read_bytes()==PNG
+    assert not CoverJob(settings,key,[book]).failures
+    assert events[-2][1]['failed']==0 and events[-2][1]['fetched']==1
+
+
+def test_nonempty_invalid_image_keeps_its_original_failure_reason(tmp_path,book):
+    from calibre.client import Client, ClientError, Library
+    from conftest import Response, Session
+    settings=Settings.load(configure(tmp_path,[book.source]))
+    response=Response(b'<html>No thumbnail</html>',headers={'Content-Type':'image/jpeg'})
+    client=Client(Library(book.source),session=Session([response]))
+    with pytest.raises(ClientError,match='Unsupported cover image') as raised:
+        fetch_image(client,book.cover_url)
+    assert response.closed
+    job=CoverJob(settings,'test',[book])
+    assert job.unavailable(book,raised.value)=='invalid-image'
 
 
 def test_language_rejection_cannot_be_overridden_by_an_old_complete_checkpoint(tmp_path):

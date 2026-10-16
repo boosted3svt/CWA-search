@@ -3,6 +3,11 @@ import requests
 from .client import ClientError
 
 
+class EmptyCoverResponse(ClientError):
+    def __init__(self):
+        super().__init__('Cover server returned an empty image response')
+
+
 def image_type(body):
     if body.startswith(b'\xff\xd8\xff'):
         return 'image/jpeg'
@@ -24,6 +29,8 @@ def fetch_image(client, url):
             if len(body) > 2_000_000:
                 raise ClientError('Cover exceeds size limit')
         body = bytes(body)
+        if not body:
+            raise EmptyCoverResponse()
         return body, image_type(body)
     except requests.RequestException as exc:
         raise ClientError('Cover transfer failed') from exc
