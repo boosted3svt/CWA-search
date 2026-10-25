@@ -23,7 +23,7 @@ async function loadSettings() {
     currentJob = settings.active_job; setBusy(true);
     followJob({id:currentJob}, null, $('include-history').checked);
   }
-  $('timeout-note').textContent = settings.prune_timeouts ? 'Timed-out libraries are removed automatically, with a backup. Use “Keep timed-out libraries” to prevent removal during a search.' : 'Automatic timeout removal is disabled in configuration.';
+  $('timeout-note').textContent = settings.prune_timeouts ? 'Repeated connectivity failures can deactivate a library. Its address stays registered to prevent duplicate retries. Use “Keep timed-out libraries” to prevent search timeouts from counting.' : 'Automatic timeout deactivation during searches is disabled in configuration.';
 }
 async function run(action, data) {
   if (busy) return;
@@ -157,6 +157,7 @@ async function loadCatalogs() {
     const cached = state.libraries.filter(library => library.cached).length;
     const count = state.libraries.reduce((total, library) => total + library.book_count, 0);
     $('catalog-summary').textContent = `${state.running ? 'Refresh running. ' : ''}${count.toLocaleString()} cached books. Searchable catalogs: ${cached} of ${state.libraries.length} discovered/configured libraries across ${state.server_count || state.libraries.length} servers. Refresh interval: ${state.interval_hours} hours. Parallel libraries: ${state.concurrency}. Searches use local metadata; downloads connect to the source server.`;
+    if (state.inactive_server_count) $('catalog-summary').textContent += ` ${state.inactive_server_count} inactive server entries retained in the register.`;
     const healthCounts = {};
     const healthNames = {healthy:'Metadata scan succeeded', language:'Excluded by library-name language', connectivity:'Unreachable', configuration:'Needs configuration', temporary:'Temporary server error', catalog:'Catalog unsupported or invalid', deadline:'Scan time limit reached', cancelled:'Scan stopped', unknown:'Not yet classified'};
     for (const library of state.libraries) healthCounts[library.health || 'unknown'] = (healthCounts[library.health || 'unknown'] || 0) + 1;
@@ -217,12 +218,12 @@ async function refreshCoverImages() {
 function renderRetired(state) {
   const entries = state.retired || [];
   $('retired-panel').hidden = entries.length === 0;
-  $('retirement-summary').textContent = `Download timeout limit: ${state.download_timeout_limit === 0 ? 'disabled' : state.download_timeout_limit}. Successful downloads reset the counter. Clearing history does not re-add servers.`;
+  $('retirement-summary').textContent = `Download timeout limit: ${state.download_timeout_limit === 0 ? 'disabled' : state.download_timeout_limit}. Successful downloads reset the counter. Deactivated addresses stay registered. Clearing this log does not reactivate or forget them.`;
   $('restore-all-retired').disabled = !entries.some(item => ['download-timeouts','scan-connectivity','library-language'].includes(item.reason) && !item.restored_at);
   $('retired-entries').replaceChildren();
   for (const entry of entries.slice().reverse()) {
     const row = node('div', '', 'retired-entry');
-    const reason = entry.reason === 'download-timeouts' ? 'Download timeout limit reached' : entry.reason === 'scan-connectivity' ? 'Connectivity scan failure limit reached' : entry.reason === 'library-language' ? 'Library-name language failure limit reached' : entry.reason === 'library-unadvertised' ? 'Library no longer advertised by server' : 'Removed from library list';
+    const reason = entry.reason === 'download-timeouts' ? 'Download timeout limit reached' : entry.reason === 'scan-connectivity' ? 'Connectivity scan failure limit reached' : entry.reason === 'library-language' ? 'Library-name language failure limit reached' : entry.reason === 'library-unadvertised' ? 'Library no longer advertised by server' : 'Deactivated manually';
     row.append(node('p', `${entry.source}${entry.library_id ? ' · '+entry.library_id : ''} · ${reason} · ${entry.reason === 'library-language' && entry.scan_detail ? entry.scan_detail+' · ' : ''}${entry.language_failure_count || 0} language failures · ${entry.timeout_count} download timeouts · ${entry.scan_failure_count || 0} connectivity scan failures · ${new Date(entry.retired_at).toLocaleString()}${entry.restored_at ? ' · Restored '+new Date(entry.restored_at).toLocaleString() : ''}`, 'source'));
     if (!entry.restored_at && entry.reason !== 'library-unadvertised') {
       const button = node('button', 'Restore server'); button.type = 'button'; button.className = 'restore-retired';
@@ -236,12 +237,12 @@ function renderRetired(state) {
   }
 }
 $('restore-all-retired').addEventListener('click', async () => {
-  if (!window.confirm('Restore all automatically retired servers with fresh caches and timeout counters? Manually deleted entries will remain removed.')) return;
+  if (!window.confirm('Restore all automatically retired servers with fresh caches and timeout counters? Manually deactivated entries will remain inactive.')) return;
   try { await api('/api/retired/restore-all', {confirm:true}); await loadCatalogs(); await loadSettings(); }
   catch (error) { notice(error.message, true); }
 });
 $('clear-retired').addEventListener('click', async () => {
-  if (!window.confirm('Clear retirement history without re-adding servers?')) return;
+  if (!window.confirm('Clear retirement history without reactivating or forgetting registered servers?')) return;
   try { await api('/api/retired/clear', {confirm:true}); await loadCatalogs(); }
   catch (error) { notice(error.message, true); }
 });

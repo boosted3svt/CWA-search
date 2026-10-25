@@ -6,7 +6,7 @@ import re
 import threading
 import uuid
 from config import Settings
-from calibre.state import History, state_lock, atomic_text, prune_library
+from calibre.state import History, state_lock, atomic_text
 from calibre.client import ClientError, LibraryTimeout
 from calibre.parser import FeedError
 from calibre.matcher import matches
@@ -213,8 +213,12 @@ class Service:
                 self.event(key, f'Timed out: {library.url}')
                 if (settings.prune_timeouts and not data.get('keep_timeouts', False)
                         and not self.snapshot(key)['cancelled']):
-                    prune_library(settings.libraries_file, line)
-                    self.event(key, 'Removed timed-out library; previous list saved to .bak')
+                    from calibre.library_state import LibraryState
+                    lifecycle = LibraryState(settings, lambda message: self.event(key, message))
+                    lifecycle.reconcile()
+                    lifecycle.scan_outcome(library, category='connectivity', count_scrape=False)
+                    lifecycle.purge_pending()
+                    self.event(key, 'Recorded connectivity failure; destinations stay registered when deactivated.')
             except (ClientError, FeedError) as exc:
                 failures += 1
                 self.event(key, f'Search failed: {exc}')

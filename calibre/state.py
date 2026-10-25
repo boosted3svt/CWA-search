@@ -95,45 +95,7 @@ def try_state_lock(path):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def prune_library(path, line):
-    """Remove only the timed-out entry; preserve comments and create a backup."""
-    path = Path(path)
-    with state_lock(path):
-        original = path.read_text()
-        backup = path.with_name(path.name + '.bak')
-        atomic_text(backup, original)
-        atomic_text(path, ''.join(item for item in original.splitlines(keepends=True)
-                                 if item.strip() != line.strip()))
-
-
 def deduplicate_libraries(settings):
-    """Keep first endpoint/explicit-library selection, comments, and invalid lines."""
-    from urllib.parse import urlsplit
-    from .client import origin, ClientError
-    path = Path(settings.libraries_file)
-    if not path.exists():
-        return 0
-    with state_lock(path):
-        original = path.read_text()
-        kept, seen, removed = [], set(), 0
-        for line in original.splitlines(keepends=True):
-            if not line.strip() or line.lstrip().startswith('#'):
-                kept.append(line)
-                continue
-            try:
-                library = settings.library(line)
-                _, hostname, port = origin(library.url)
-                key = (hostname, port, urlsplit(library.url).path.rstrip('/'),
-                       library.library_id if library.explicit_id else '')
-            except (ClientError, ValueError):
-                kept.append(line)
-                continue
-            if key in seen:
-                removed += 1
-            else:
-                seen.add(key)
-                kept.append(line)
-        if removed:
-            atomic_text(path.with_name(path.name + '.dedup.bak'), original)
-            atomic_text(path, ''.join(kept))
-        return removed
+    """Register pasted additions; keep known inactive destinations inactive."""
+    from .library_list import sync
+    return sync(settings)

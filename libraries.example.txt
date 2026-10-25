@@ -1,5 +1,8 @@
 # Copy to libraries.txt, then add libraries you are authorized to access.
 # Bare HOST:PORT or HTTP(S) URL scans all advertised libraries.
 # Add ?library_id=ID to select only one library.
+# The app creates a url | total | fails | scrapes | active table automatically.
+# Keep inactive entries; pasted duplicates will not reactivate them.
+# New additions: paste one URL or HOST:PORT per line below.
 # 127.0.0.1:8080
 # http://127.0.0.1:8080?library_id=Calibre_Library

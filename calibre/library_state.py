@@ -57,7 +57,7 @@ class LibraryState:
         record = {**entry, 'id': uuid.uuid4().hex, 'key': key, 'retired_at': now(), 'reason': reason}
         data['history'].append(record)
         data['pending'][key] = record
-        self.report(f'Removed {entry["source"]} [library {entry["library_id"] or "default"}]: {reason}; {entry["timeout_count"]} download timeouts; {entry.get("scan_failure_count", 0)} connectivity scan failures')
+        self.report(f'Deactivated {entry["source"]} [library {entry["library_id"] or "default"}]: {reason}; {entry["timeout_count"]} download timeouts; {entry.get("scan_failure_count", 0)} connectivity scan failures')
 
     def reconcile(self):
         with state_lock(self.gate):
@@ -101,6 +101,9 @@ class LibraryState:
                 if key not in configured:
                     raw_sources = {lib.url for _, lib in self.settings.raw_libraries()}
                     reason = 'library-unadvertised' if data['active'][key].get('parent_url') and data['active'][key]['source'] in raw_sources else 'manual-removal'
+                    if reason == 'manual-removal':
+                        from .library_list import update
+                        update(self.settings, data['active'][key]['line'], active=False)
                     self.remove_entry(data, key, reason)
             for key, (line, library) in configured.items():
                 if key not in data['active'] and key not in data['pending']:
@@ -178,22 +181,13 @@ class LibraryState:
                 return
             if handled:
                 key = library_key(replace(library, library_id='', explicit_id=False, parent_url=''))
-        path = Path(self.settings.libraries_file)
-        with state_lock(path):
-            original = path.read_text()
-            kept = []
-            for line in original.splitlines(keepends=True):
-                if line.strip() and not line.lstrip().startswith('#'):
-                    try:
-                        if library_key(self.settings.library(line)) == key:
-                            continue
-                    except ValueError:
-                        pass
-                kept.append(line)
-            atomic_text(path.with_name(path.name + '.bak'), original)
-            atomic_text(path, ''.join(kept))
+        from .library_list import update
+        for line, library in self.settings.raw_libraries():
+            if library_key(library) == key:
+                update(self.settings, line, active=False)
+                break
 
-    def scan_outcome(self, library, success=False, category=None, detail=None, attempt_started=None):
+    def scan_outcome(self, library, success=False, category=None, detail=None, attempt_started=None, count_scrape=True):
         """At most one connectivity count per refresh interval, including manual scans."""
         key = library_key(library)
         with state_lock(self.gate):
@@ -201,6 +195,19 @@ class LibraryState:
             entry = data['active'].get(key)
             if not entry or key not in self.configured():
                 return
+            # Metadata publication and worker completion can report the same
+            # attempt several times. Count one terminal metadata outcome only.
+            attempt = attempt_started or uuid.uuid4().hex
+            if count_scrape and category != 'cancelled' and entry.get('last_scrape_attempt') != attempt:
+                from .library_list import update
+                from .cache import CatalogStore
+                manifest = CatalogStore(self.directory).manifest()['libraries']
+                selection = self.settings.library(entry['line'])
+                matching = [row for row in manifest.values() if row['source'] == selection.url
+                            and (not selection.explicit_id or row.get('configured_library_id') == selection.library_id)]
+                total = sum(row.get('book_count', 0) for row in matching) if success and matching else None
+                update(self.settings, entry['line'], fails=int(not success), scrapes=int(success), total=total)
+                entry['last_scrape_attempt'] = attempt
             entry['scan_category'] = 'healthy' if success else category
             entry['scan_detail'] = None if success else detail
             entry['last_scan_outcome'] = now()
@@ -273,36 +280,15 @@ class LibraryState:
                 raise ValueError('Library no longer advertised; refresh its server to discover it again')
             if any(item['key'] in data['pending'] for item in records):
                 raise ValueError('A removed scan is still stopping; retry restoration shortly')
-            path = Path(self.settings.libraries_file)
-            with state_lock(path):
-                original = path.read_text()
-                configured = self.configured()
-                additions = []
-                for item in records:
-                    from .servers import restore_selection
-                    restore_selection(self.settings, item)
-                    if item['key'] not in configured:
-                        parent_present = any(lib.url == item['source'] and not lib.explicit_id for _, lib in self.settings.raw_libraries())
-                        if not parent_present and item['line'] not in additions:
-                            additions.append(item['line'])
-                        library = replace(self.settings.library(item['line']), library_id=item['library_id'],
-                                          explicit_id=item['explicit_id'], parent_url=item.get('parent_url',''))
-                        data['active'][item['key']] = self.new_entry(item['line'], library)
-                        configured[item['key']] = (item['line'], library)
-                    else:
-                        if item['key'] not in data['active']:
-                            line, library = configured[item['key']]
-                            data['active'][item['key']] = self.new_entry(line, library)
-                        else:
-                            data['active'][item['key']]['timeout_count'] = 0
-                            data['active'][item['key']]['scan_failure_count'] = 0
-                            data['active'][item['key']]['language_failure_count'] = 0
-                            data['active'][item['key']].pop('last_counted_language_failure', None)
-                            data['active'][item['key']].pop('last_counted_scan_failure', None)
-                    item['restored_at'] = now()
-                if additions:
-                    atomic_text(path, original + ('\n' if original and not original.endswith('\n') else '') +
-                                '\n'.join(additions) + '\n')
+            from .library_list import update
+            from .servers import restore_selection
+            for item in records:
+                restore_selection(self.settings, item)
+                update(self.settings, item['line'], active=True)
+                library = replace(self.settings.library(item['line']), library_id=item['library_id'],
+                                  explicit_id=item['explicit_id'], parent_url=item.get('parent_url',''))
+                data['active'][item['key']] = self.new_entry(item['line'], library)
+                item['restored_at'] = now()
             self.save(data)
         self.report(f'Restored {len(records)} retired entries with counters reset')
         return len(records)

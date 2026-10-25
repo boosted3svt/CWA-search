@@ -234,7 +234,11 @@ class CatalogManager:
             item['batch_state'] = batch.get(library_key(library), 'not in latest batch')
         for item in activities:
             item['elapsed_seconds'] = round(time.monotonic() - item.pop('started_monotonic'), 1)
+        from .library_list import rows
+        registered = rows(settings) if Path(settings.libraries_file).exists() else []
         return {'enabled': settings.catalog_cache_enabled, 'running': running, 'events': events,
+                'registered_servers': registered,
+                'inactive_server_count': sum(not row['active'] for row in registered),
                 'batch': {name: list(batch.values()).count(name) for name in ('queued','checking','scanning','succeeded','failed','skipped','cancelled')},
                 'server_count': len({lib.url for _, lib in settings.raw_libraries()}),
                 'libraries': entries, 'interval_hours': settings.catalog_refresh_interval_hours,
@@ -283,6 +287,7 @@ class CatalogManager:
         if not entry:
             raise ScanCancelled('Library removed before its worker started')
         generation = entry['generation']
+        attempt_started = CatalogStore(settings.catalog_cache_dir).entry(library).get('last_attempt')
         next_membership_check = started
         with self.lock:
             self.activities[key] = {'source': library.url, 'phase': 'starting', 'count': 0,
@@ -350,13 +355,13 @@ class CatalogManager:
                                 'retry_not_before': None, 'temporary_failure_count': 0,
                                 'covers_pending': settings.catalog_cache_covers,
                                 'covers_in_progress': settings.catalog_cache_covers})
-                        lifecycle.scan_outcome(library, success=True)
+                        lifecycle.scan_outcome(library, success=True, attempt_started=attempt_started)
                         with self.lock:
                             self.activities[key]['metadata_published'] = True
                     if item.get('phase') == 'metadata-complete' and not covers_only:
                         published = self.publish_metadata(settings, library, generation)
                         if published:
-                            lifecycle.scan_outcome(library, success=True)
+                            lifecycle.scan_outcome(library, success=True, attempt_started=attempt_started)
                         with self.lock:
                             self.activities[key]['metadata_published'] = published
                     if item.get('phase') == 'covers' and 'unavailable_reasons' in item:
@@ -495,7 +500,7 @@ class CatalogManager:
                         if not covers_only and not summary.get('metadata_published') and not self.publish_metadata(settings, library):
                             raise ClientError('Worker did not save a complete catalog; old snapshot retained')
                         if not covers_only:
-                            lifecycle.scan_outcome(library, success=True)
+                            lifecycle.scan_outcome(library, success=True, attempt_started=started)
                         with state_lock(lifecycle.gate):
                             if not lifecycle.allowed(library):
                                 self.event(f'{library.url}: removed; discarding worker completion')
@@ -537,7 +542,7 @@ class CatalogManager:
                             except Exception:
                                 pass
                         if published and not covers_only:
-                            lifecycle.scan_outcome(library, success=True)
+                            lifecycle.scan_outcome(library, success=True, attempt_started=started)
                         elif not published:
                             lifecycle.scan_outcome(library, category=category, detail=str(exc), attempt_started=started)
                         with state_lock(lifecycle.gate):

@@ -43,13 +43,13 @@ def test_scan_retirement_interval_reset_and_restore(tmp_path, book):
     state.save(data)
     state.scan_outcome(library, category='connectivity', detail='refused')
     state.purge_pending()
-    assert not Path(settings.libraries_file).read_text()
+    assert not settings.raw_libraries()
     assert store.read(library)[0] is None
     record = state.load()['history'][-1]
     assert record['reason'] == 'scan-connectivity' and record['scan_failure_count'] == 2
     state.restore(all_retired=True)
     assert state.load()['active'][key]['scan_failure_count'] == 0
-    assert Path(settings.libraries_file).read_text().strip() == book.source
+    assert [line for line,_ in settings.raw_libraries()] == [book.source]
 
 
 def test_worker_classification_reaches_parent_and_retires(tmp_path):

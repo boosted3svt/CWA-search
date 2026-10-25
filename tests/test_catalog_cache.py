@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 import json
 import threading
 import pytest
+from config import Settings
 from calibre.client import Client, Library, ClientError
 from calibre.catalog import full_catalog, ScanCancelled
 from calibre.cache import CatalogStore, CatalogManager, library_key, now
@@ -102,7 +103,7 @@ def test_failed_refresh_retains_old_snapshot_and_records_error(tmp_path, book, m
     books, entry = store.read(library)
     assert books == [book] and entry['snapshot'] == old['snapshot']
     assert entry['error'] == 'Page 2 failed'
-    assert (tmp_path / 'libraries.txt').read_text() == book.source+'\n'
+    assert [line for line,_ in Settings.load(config).raw_libraries()] == [book.source]
     manager.close()
 
 

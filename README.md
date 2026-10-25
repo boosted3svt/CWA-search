@@ -74,6 +74,23 @@ http://192.168.1.22:8080?library_id=My_Library
 
 Bare `HOST:PORT` entries use HTTP. A bare server address discovers and scans all advertised libraries separately. Use `?library_id=...` to scan only that library. Discovered IDs are stored in `state/catalogs/servers.json`, not appended to your text file. Each library has its own catalog, count check, covers, and health; the GUI combines their search results. Libraries on the same configured server are scanned sequentially, while different server entries use the parallel workers. Lines beginning with `#` are comments. Duplicate entries are removed automatically. Do not put credentials in URLs.
 
+On startup and during scheduler maintenance, the app converts the list into an editable register:
+
+```text
+url                         | total | fails | scrapes | active
+http://192.168.1.20:8080     | 756   | 3     | 37      | false
+http://192.168.1.21:9090     | 775   | 0     | 71      | true
+
+# New additions: paste one URL or HOST:PORT per line below.
+192.168.1.30:8080
+```
+
+Paste new addresses below **New additions**; the app moves unique entries into the table. Matching host/IP and port combinations are duplicates, even with different HTTP/HTTPS spelling on the same port. Different ports remain separate. Explicit `?library_id=...` selections remain independent. An existing table row takes precedence over a pasted address, including when `active` is `false`.
+
+`total` is the last known book count, summed across discovered libraries for a bare server. `fails` counts failed metadata scan operations; `scrapes` counts successful metadata scans or successful remote count checks. Each sub-library counts separately; cover-only jobs and cancelled scans do not increment these counters. They are lifetime counters from this upgrade onward and are separate from the consecutive failures used for retirement. Existing catalog counts are imported; historical lifetime counters that were never recorded start at zero.
+
+Inactive entries are kept for comparison and are not scanned. Their memory is also saved in `state/catalogs/library-register.json`, so clearing the retirement log or pasting an old address again does not reactivate it. Use **Restore server**, or deliberately change the table row's final `active` column from `false` to `true`, to retry an inactive server. Preserve the column separators when editing. The original list is backed up as `libraries.txt.original.bak` during conversion.
+
 In `config.json`, change these existing settings:
 
 | Setting | Recommended starting value | Purpose |
@@ -118,9 +135,9 @@ Completed metadata becomes searchable before covers finish. Missing covers use a
 - **Fetch missing covers:** use saved metadata to fetch missing covers without rescanning book lists.
 - **Stop refresh:** retain saved progress and pause automatic refresh for one interval, until a manual refresh, or until restart.
 
-Repeated connectivity failures can retire a library, removing its address and cached data. The default scan threshold is three failures, counted at most once per library per refresh interval; successful metadata scans reset that counter. Ebook download timeouts have a separate counter. Authentication, certificate, catalog compatibility errors, and the overall scan time limit do not trigger connectivity retirement. Clear non-English library names have a separate `library_language_failure_limit` (default 3, 0 disables retirement), counted at most once per refresh interval. Those libraries are excluded from cached search while awaiting retirement; healthy siblings remain available. Use **Retired servers** to inspect or restore automatically retired sources.
+Repeated connectivity failures can retire a library, marking it inactive and removing its cached data while retaining its address and lifetime counters. The default scan threshold is three failures, counted at most once per library per refresh interval; successful metadata scans reset that consecutive counter. Ebook download timeouts have a separate counter. Authentication, certificate, catalog compatibility errors, and the overall scan time limit do not trigger connectivity retirement. Clear non-English library names have a separate `library_language_failure_limit` (default 3, 0 disables retirement), counted at most once per refresh interval. Those libraries are excluded from cached search while awaiting retirement; healthy siblings remain available. Use **Retired servers** to inspect or restore automatically retired sources. Older automatic retirements still present in retirement history are imported as inactive entries.
 
-Deleting a bare server entry from `libraries.txt` removes all its discovered libraries and their cached metadata and unshared covers. A retired sub-library is excluded independently; the bare server entry is removed automatically only when every advertised library has been retired. The GUI separates server counts from discovered library counts. Downloaded ebooks are preserved.
+Deleting an active bare server entry from `libraries.txt`, or setting it inactive, removes all its discovered libraries and their cached metadata and unshared covers. Its address remains as an inactive reference row. A retired sub-library is excluded independently; the bare server row becomes inactive automatically only when every advertised library has been retired. Inactive rows are retained even if omitted from a later pasted list. The GUI separates server counts from discovered library counts and reports retained inactive entries. Downloaded ebooks are preserved.
 
 Library-name language checks recognize non-Latin lettering and common non-English library wording. They do not establish the language of the books. Ambiguous names such as “Calibre” are kept by default; `reject_unknown_library_language: true` also rejects uncertain names. To override a classification, add `library_language_overrides` to `config.json`, mapping a library ID—or a scoped `SERVER_URL?library_id=ID`—to `english` or `non-english`. For example:
 

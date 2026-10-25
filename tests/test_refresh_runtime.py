@@ -267,7 +267,8 @@ def test_dedup_normalizes_endpoints_preserves_selection_and_comments(tmp_path):
     settings=Settings.load(config)
     assert deduplicate_libraries(settings)==4
     assert path.with_name('libraries.txt.dedup.bak').read_text()==original
-    assert path.read_text().startswith('# My servers\n172.1.2.3:8080\nhttp://BOOKS.test\n')
+    assert path.read_text().startswith('# My servers\nurl')
+    assert [line for line,_ in settings.raw_libraries()][:2]==['172.1.2.3:8080','http://BOOKS.test']
     assert '?library_id=Other' in path.read_text() and '?library_id=Another' in path.read_text()
     assert deduplicate_libraries(settings)==0
 
@@ -277,10 +278,10 @@ def test_startup_dedup_runs_even_when_catalog_caching_disabled(tmp_path):
     manager=CatalogManager(config)
     try:
         manager.start()
-        assert (tmp_path/'libraries.txt').read_text()=='books.test:80\n'
+        assert [line for line,_ in Settings.load(config).raw_libraries()]==['books.test:80']
         with (tmp_path/'libraries.txt').open('a') as handle:handle.write('books.test:80\n')
         manager.maintain_libraries(Settings.load(config))
-        assert (tmp_path/'libraries.txt').read_text()=='books.test:80\n'
+        assert [line for line,_ in Settings.load(config).raw_libraries()]==['books.test:80']
     finally:manager.close()
 
 

@@ -7,6 +7,7 @@ config.json
 libraries.txt
 libraries.txt.bak
 libraries.txt.dedup.bak
+libraries.txt.original.bak
 libraries.txt.lock
 *.part
 .env

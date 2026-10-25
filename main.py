@@ -10,7 +10,7 @@ from calibre.client import Client, ClientError, LibraryTimeout
 from calibre.downloader import download, SUPPORTED_FORMATS
 from calibre.matcher import matches
 from calibre.parser import FeedError
-from calibre.state import History, prune_library, state_lock, deduplicate_libraries
+from calibre.state import History, state_lock, deduplicate_libraries
 from calibre.library_state import LibraryState
 
 
@@ -101,8 +101,12 @@ def search(args, settings, history):
             failures += 1
             print(f'Timed out: {library.url}', file=sys.stderr)
             if settings.prune_timeouts and not args.keep_timeouts:
-                prune_library(settings.libraries_file, line)
-                print('Removed timed-out library; previous list saved to .bak', file=sys.stderr)
+                from calibre.library_state import LibraryState
+                lifecycle = LibraryState(settings)
+                lifecycle.reconcile()
+                lifecycle.scan_outcome(library, category='connectivity', count_scrape=False)
+                lifecycle.purge_pending()
+                print('Recorded connectivity failure; destination is kept inactive if its failure limit is reached', file=sys.stderr)
         except (ClientError, FeedError) as exc:
             failures += 1
             if getattr(client, 'discovery_message', ''):

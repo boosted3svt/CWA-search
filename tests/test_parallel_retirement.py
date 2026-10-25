@@ -82,8 +82,8 @@ def test_consecutive_timeouts_reset_retire_purge_restore_and_clear(tmp_path,book
         assert manager.download_outcome(library,timed_out=False) is None
         outcome=manager.download_outcome(library,timed_out=True)
         assert outcome['retired'] and outcome['timeout_count']==2
-        assert not (tmp_path/'libraries.txt').read_text()
-        assert (tmp_path/'libraries.txt.bak').read_text()==book.source+'\n'
+        assert not settings.raw_libraries()
+        assert (tmp_path/'libraries.txt.original.bak').read_text()==book.source+'\n'
         assert store.read(library)[0] is None
         assert not (store.directory/'covers'/(cached.key+'.img')).exists()
         assert (ingest/'existing.epub').read_bytes()==b'keep'
@@ -112,9 +112,11 @@ def test_manual_removal_purges_and_bulk_restore_excludes_it(tmp_path,book):
         record=manager.status()['retired'][0]
         assert record['reason']=='manual-removal'
         with pytest.raises(ValueError,match='No retired'):manager.restore(all_retired=True)
-        # Manual re-addition starts fresh and marks the old history as restored.
+        # Pasting the old address does not override the inactive register.
         (tmp_path/'libraries.txt').write_text(book.source+'\n')
         manager.maintain_libraries(settings)
+        assert not settings.raw_libraries()
+        manager.restore(record['id'])
         assert LibraryState(settings).load()['active'][library_key(library)]['timeout_count']==0
         assert manager.status()['retired'][0]['restored_at']
     finally:manager.close()

@@ -49,7 +49,7 @@ def test_language_counter_and_retirement_do_not_remove_english_sibling(tmp_path)
             manager.refresh(force=True);finish(manager)
             assert [r['library_id'] for r in manager.status()['libraries']]==['B']
             assert manager.status()['retired'][-1]['reason']=='library-language'
-            assert (tmp_path/'libraries.txt').read_text()==url+'\n'
+            assert [line for line,_ in Settings.load(config).raw_libraries()]==[url]
         finally:manager.close()
 
 

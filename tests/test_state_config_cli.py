@@ -3,7 +3,7 @@ from argparse import Namespace
 import pytest
 from config import Settings
 from calibre.client import LibraryTimeout, ClientError
-from calibre.state import History, prune_library
+from calibre.state import History
 from main import search, choose_format
 
 
@@ -37,13 +37,16 @@ def test_ids_scoped_to_source_and_library(book):
     assert book.key != replace(book, library_id='Other').key
 
 
-def test_prune_preserves_other_entries_and_backup(tmp_path):
+def test_deactivation_preserves_other_entries_and_backup(tmp_path):
+    from calibre.library_list import rows, update
     path = tmp_path / 'libraries.txt'
     original = '# comment\nbooks.test:80\nother.test:80\n'
     path.write_text(original)
-    prune_library(path, 'books.test:80')
-    assert path.read_text() == '# comment\nother.test:80\n'
-    assert path.with_name('libraries.txt.bak').read_text() == original
+    settings=Settings(libraries_file=str(path),catalog_cache_dir=str(tmp_path/'catalogs'))
+    update(settings,'books.test:80',active=False)
+    assert [(row['url'],row['active']) for row in rows(settings)]==[('books.test:80',False),('other.test:80',True)]
+    assert [line for line,_ in settings.raw_libraries()]==['other.test:80']
+    assert path.with_name('libraries.txt.original.bak').read_text() == original
 
 
 def test_search_skips_failed_match_and_stops_at_next(monkeypatch, tmp_path, book):
@@ -75,7 +78,7 @@ def test_search_skips_failed_match_and_stops_at_next(monkeypatch, tmp_path, book
 def test_only_timeouts_pruned(monkeypatch, tmp_path, error, removed):
     entries = tmp_path / 'libraries.txt'
     entries.write_text('books.test:80\n')
-    settings = Settings(libraries_file=str(entries))
+    settings = Settings(libraries_file=str(entries), catalog_cache_dir=str(tmp_path/'catalogs'), library_scan_failure_limit=1)
     class Fake:
         def search(self, term): raise error
         def close(self): pass
@@ -83,7 +86,7 @@ def test_only_timeouts_pruned(monkeypatch, tmp_path, error, removed):
     args = Namespace(author='Emily Rath', title=None, exact=False, include_history=False,
                      all_libraries=False, keep_timeouts=False, json=True, select=False)
     assert search(args, settings, History(tmp_path / 'history.json')) == 1
-    assert (not entries.read_text()) == removed
+    assert (not settings.raw_libraries()) == removed
 
 
 def test_empty_search_preserves_library(monkeypatch, tmp_path):

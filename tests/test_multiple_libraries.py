@@ -53,7 +53,7 @@ def test_bare_server_scans_every_library_and_cached_search_combines_results(tmp_
         try:
             manager.refresh(force=True);finish(manager)
             settings=Settings.load(config)
-            assert (tmp_path/'libraries.txt').read_text()==url+'\n'
+            assert [line for line,_ in Settings.load(config).raw_libraries()]==[url]
             assert len(settings.libraries())==2
             status=manager.status()
             assert status['server_count']==1 and len(status['libraries'])==2
@@ -120,7 +120,7 @@ def test_new_and_removed_advertised_libraries_reconcile_without_changing_server_
             assert store.read(old)[0] is None
             assert not (store.directory/'covers'/(oldbook.key+'.img')).exists()
             assert any(r['reason']=='library-unadvertised' for r in manager.status()['retired'])
-            assert (tmp_path/'libraries.txt').read_text()==url+'\n'
+            assert [line for line,_ in Settings.load(config).raw_libraries()]==[url]
             (tmp_path/'libraries.txt').write_text('')
             manager.maintain_libraries(settings)
             assert not store.manifest()['libraries']
@@ -139,15 +139,15 @@ def test_child_retirement_preserves_parent_then_restore_uses_single_line(tmp_pat
             child=next(lib for _,lib in settings.libraries() if lib.explicit_id)
             lifecycle.scan_outcome(child,category='connectivity');lifecycle.purge_pending()
             assert len(settings.libraries())==1
-            assert (tmp_path/'libraries.txt').read_text()==url+'\n'
+            assert [line for line,_ in Settings.load(config).raw_libraries()]==[url]
             lifecycle.restore(all_retired=True)
             assert len(settings.libraries())==2
-            assert (tmp_path/'libraries.txt').read_text()==url+'\n'
+            assert [line for line,_ in Settings.load(config).raw_libraries()]==[url]
             lifecycle.scan_outcome(child,category='connectivity');lifecycle.purge_pending()
             lifecycle.scan_outcome(default,category='connectivity');lifecycle.purge_pending()
-            assert not (tmp_path/'libraries.txt').read_text()
+            assert not settings.raw_libraries()
             lifecycle.restore(all_retired=True)
-            assert (tmp_path/'libraries.txt').read_text()==url+'\n'
+            assert [line for line,_ in Settings.load(config).raw_libraries()]==[url]
             assert len(settings.libraries())==2
         finally:manager.close()
 
@@ -171,11 +171,11 @@ def test_discovery_keeps_existing_default_snapshot_and_failing_child_does_not_bl
             status=manager.status()
             assert status['batch']['failed']==1 and status['batch']['succeeded']==1
             assert next(row for row in status['libraries'] if row['library_id']=='B')['health']=='healthy'
-            assert (tmp_path/'libraries.txt').read_text()==url+'\n'
+            assert [line for line,_ in Settings.load(config).raw_libraries()]==[url]
         finally:manager.close()
 
 
-def test_manual_readd_after_every_child_retired_starts_fresh(tmp_path):
+def test_manual_readd_after_every_child_retired_stays_inactive_until_restored(tmp_path):
     with multi_server() as (url,state,calls):
         config=configure(tmp_path,[url],library_scan_failure_limit=1)
         manager=CatalogManager(config)
@@ -184,9 +184,11 @@ def test_manual_readd_after_every_child_retired_starts_fresh(tmp_path):
             settings=Settings.load(config);lifecycle=LibraryState(settings)
             for _,lib in list(settings.libraries()):
                 lifecycle.scan_outcome(lib,category='connectivity');lifecycle.purge_pending()
-            assert not (tmp_path/'libraries.txt').read_text()
+            assert not settings.raw_libraries()
             (tmp_path/'libraries.txt').write_text(url+'\n')
             manager.maintain_libraries(settings)
+            assert settings.libraries()==[]
+            lifecycle.restore(all_retired=True)
             assert len(settings.libraries())==2
             assert all(entry['scan_failure_count']==0 for entry in lifecycle.load()['active'].values())
         finally:manager.close()
@@ -207,7 +209,7 @@ def test_live_search_discovers_siblings_without_a_prior_refresh(tmp_path):
             settings=Settings.load(config)
             assert len(settings.libraries())==2
             assert not CatalogStore(settings.catalog_cache_dir).manifest()['libraries']
-            assert (tmp_path/'libraries.txt').read_text()==url+'\n'
+            assert [line for line,_ in Settings.load(config).raw_libraries()]==[url]
         finally:service.executor.shutdown(wait=True);service.catalogs.close()
 
 

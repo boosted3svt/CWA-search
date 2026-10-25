@@ -230,9 +230,13 @@ def test_stop_search_skips_remaining_libraries(website, monkeypatch, book):
     assert 'Search stopped' in state['message']
 
 
-def test_web_timeout_prunes_but_continues(website, monkeypatch):
+def test_web_timeout_retains_until_connectivity_limit_but_continues(website, monkeypatch):
     from calibre.client import LibraryTimeout
-    url, _, directory = website
+    from calibre.library_state import LibraryState
+    from calibre.library_list import rows
+    from config import Settings
+    from datetime import datetime, timedelta, timezone
+    url, service, directory = website
     path = directory / 'libraries.txt'
     path.write_text('offline.test:80\nworking.test:80\n')
     class Fake:
@@ -245,11 +249,21 @@ def test_web_timeout_prunes_but_continues(website, monkeypatch):
             return []
         def close(self): pass
     monkeypatch.setattr('web.service.make_client', lambda settings, library: Fake(library))
-    response = post(url, '/api/search', {'author':'Emily'})
-    state = wait_job(url, response.json()['id'])
-    assert state['status'] == 'done' and state['failed_libraries'] == 1
-    assert path.read_text() == 'working.test:80\n'
-    assert path.with_name('libraries.txt.bak').exists()
+    settings=Settings.load(service.config)
+    lifecycle=LibraryState(settings)
+    for attempt in range(3):
+        if attempt:
+            data=lifecycle.load()
+            for entry in data['active'].values():
+                entry['last_counted_scan_failure']=(datetime.now(timezone.utc)-timedelta(days=2)).isoformat()
+            lifecycle.save(data)
+        response = post(url, '/api/search', {'author':'Emily'})
+        state = wait_job(url, response.json()['id'])
+        assert state['status'] == 'done' and state['failed_libraries'] == 1
+        assert len(settings.raw_libraries()) == (2 if attempt < 2 else 1)
+    assert [line for line,_ in settings.raw_libraries()] == ['working.test:80']
+    assert next(row for row in rows(settings) if row['url']=='offline.test:80')['active'] is False
+    assert path.with_name('libraries.txt.original.bak').exists()
 
 
 def test_cover_cannot_proxy_arbitrary_server(website):

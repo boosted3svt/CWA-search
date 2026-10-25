@@ -105,9 +105,8 @@ class Settings:
                        explicit_id='library_id' in query, verify_tls=self.verify_tls)
 
     def raw_libraries(self):
-        path = Path(self.libraries_file)
-        lines = path.read_text().splitlines()
-        return [(line, self.library(line)) for line in lines if line.strip() and not line.lstrip().startswith('#')]
+        from calibre.library_list import rows
+        return [(row['url'], self.library(row['url'])) for row in rows(self) if row['active']]
 
     def libraries(self):
         from calibre.servers import expand
