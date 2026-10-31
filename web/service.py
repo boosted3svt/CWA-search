@@ -13,6 +13,7 @@ from calibre.matcher import matches
 from calibre.cache import CatalogManager, CatalogStore, is_stale
 from calibre.images import fetch_image, image_type
 from calibre.downloader import download, SUPPORTED_FORMATS
+from calibre.summaries import lookup_summary
 from main import make_client, choose_format, result_library
 
 
@@ -36,6 +37,24 @@ class Service:
         self.active = None
         self.catalogs = CatalogManager(self.config)
         self.cover_slots = threading.BoundedSemaphore(2)
+        self.summary_slots = threading.BoundedSemaphore(2)
+
+    def summary(self, key):
+        if not isinstance(key, str) or not re.fullmatch(r'[0-9a-f]{24}', key):
+            raise ValueError('Expected a book result ID')
+        if not self.summary_slots.acquire(blocking=False):
+            raise BusyError('Two summary lookups are already running. Please try again shortly.')
+        try:
+            settings = Settings.load(self.config)
+            # History is atomically replaced. Read the selected metadata without
+            # holding the search/download lock during a public API request.
+            try:
+                book = History(settings.history_file).book(key)
+            except KeyError:
+                raise ValueError('Book result not found; search again') from None
+            return lookup_summary(book)
+        finally:
+            self.summary_slots.release()
 
     def settings(self):
         settings = Settings.load(self.config)

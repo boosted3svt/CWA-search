@@ -122,8 +122,10 @@ You can close the terminal. The container runs in the background and restarts af
 
 1. **Let the initial catalog refresh run.** The Local catalogs panel shows active workers, latest scan outcomes, and batch progress. Expand **Library freshness and refresh activity** for individual library details.
 2. **Search by author, title, or both.** Enable **Search all libraries** to collect matches across libraries; otherwise the search stops at the first library with eligible matches.
-3. **Check the title, author, and cover.** Select an available format and download the book. Files are saved in your configured server folder, with readable title and author names.
+3. **Check the title, author, and cover.** Click **Summary** for an optional online description. Select an available format and download the book. Files are saved in your configured server folder, with readable title and author names.
 4. **Check the result.** A green check indicates a saved download. A red X indicates a failed attempt; use **Find another server** to try another source. **Include previous attempts** allows deliberate retries of previously attempted formats.
+
+**Summary** looks up a description from Open Library, with Google Books as a best-effort fallback, and shows a source link. Only the selected title and author are sent to these public APIs; library addresses and credentials are not sent. Nothing is fetched before clicking, and descriptions are not saved in catalogs or history. Reopening performs a fresh lookup. The app server needs Internet access; no API key is configured. Some books have no verified match. Providers may be unavailable or rate-limited; HTTP 429 pauses that provider for at least an hour (longer if requested by the provider) without blocking the other source. This cooldown is held in memory, not on disk.
 
 Refreshes compare the remote book count with the saved catalog when a usable count can be established from the first and last pages. Equal counts reuse metadata; changed or unavailable counts trigger a metadata scan. With unchanged metadata, a complete set of saved covers also skips cover downloads. Same-count book replacements and metadata-only edits will not be detected by this shortcut.
 

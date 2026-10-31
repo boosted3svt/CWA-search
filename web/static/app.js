@@ -7,8 +7,9 @@ let failedSelection = null;
 let coverPollOffset = 0;
 let coverPollGrace = 0;
 let coverPollBusy = false;
+let summaryRequest = null;
 function notice(message, error = false) { $('notice').textContent = message; $('notice').className = error ? 'error' : ''; }
-function setBusy(value) { busy = value; document.querySelectorAll('button').forEach(button => { if (!['refresh-catalogs','refresh-covers','stop-catalogs','restore-all-retired','clear-retired','restore-retired'].includes(button.id)) button.disabled = value; }); }
+function setBusy(value) { busy = value; document.querySelectorAll('button').forEach(button => { if (!button.classList.contains('summary-button') && !['close-summary','refresh-catalogs','refresh-covers','stop-catalogs','restore-all-retired','clear-retired','restore-retired'].includes(button.id)) button.disabled = value; }); }
 async function api(path, data) {
   const response = await fetch(path, data === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json','X-OPDS-UI':'1'},body:JSON.stringify(data)});
   const value = await response.json();
@@ -60,6 +61,39 @@ async function followJob(job, action, includeHistory) {
   finally { currentJob = null; $('stop-button').hidden = true; setBusy(false); }
 }
 function node(tag, text, className) { const element = document.createElement(tag); element.textContent = text; if (className) element.className = className; return element; }
+async function showSummary(book) {
+  if (summaryRequest) summaryRequest.abort();
+  const request = new AbortController(); summaryRequest = request;
+  $('summary-title').textContent = book.title;
+  $('summary-author').textContent = book.authors.join(', ') || 'Unknown author';
+  $('summary-status').textContent = 'Looking up a matching summary online…';
+  $('summary-text').textContent = '';
+  $('summary-source').hidden = true; $('summary-source').removeAttribute('href');
+  if (!$('summary-dialog').open) $('summary-dialog').showModal();
+  try {
+    const response = await fetch('/api/summary', {method:'POST', signal:request.signal,
+      headers:{'Content-Type':'application/json','X-OPDS-UI':'1'}, body:JSON.stringify({id:book.key})});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Unable to look up this summary.');
+    if (summaryRequest !== request || !$('summary-dialog').open) return;
+    if (result.status === 'found') {
+      $('summary-status').textContent = `Matched: ${result.matched_title} · ${result.matched_authors.join(', ')}`;
+      $('summary-text').textContent = result.description;
+      $('summary-source').textContent = `Read more at ${result.source}`;
+      $('summary-source').href = result.source_url; $('summary-source').hidden = false;
+    } else $('summary-status').textContent = result.message;
+  } catch (error) {
+    if (error.name !== 'AbortError' && summaryRequest === request) $('summary-status').textContent = error.message;
+  } finally {
+    if (summaryRequest === request) summaryRequest = null;
+  }
+}
+$('close-summary').addEventListener('click', () => $('summary-dialog').close());
+$('summary-dialog').addEventListener('close', () => {
+  if (summaryRequest) summaryRequest.abort();
+  summaryRequest = null;
+  $('summary-text').textContent = ''; $('summary-source').hidden = true;
+});
 function showResults(books, includeHistory) {
   coverPollOffset = 0;
   $('results').replaceChildren(); $('result-heading').textContent = books.length ? `${books.length} matching ${books.length === 1 ? 'book' : 'books'}` : 'No eligible matches';
@@ -92,11 +126,13 @@ function showResults(books, includeHistory) {
     for (const format of book.formats) { const option = node('option', format.toUpperCase()); option.value = format; select.append(option); }
     select.value = book.preferred_format; label.append(select); details.append(label);
     const actions = node('div', '', 'actions');
+    const summary = node('button', 'Summary', 'summary-button'); summary.type = 'button';
+    summary.addEventListener('click', () => showSummary(book));
     const download = node('button', 'Download to server', 'primary'); download.addEventListener('click', () => run('download', {id:book.key,format:select.value,include_history:includeHistory}));
     const bad = node('button', 'Reject this format'); bad.addEventListener('click', () => {
       if (confirm(`Skip ${select.value.toUpperCase()} for “${book.title}” in future searches?`)) run('mark-bad', {id:book.key,format:select.value,include_history:true});
     });
-    actions.append(download, bad); details.append(actions); card.append(details); $('results').append(card);
+    actions.append(summary, download, bad); details.append(actions); card.append(details); $('results').append(card);
   }
   setBusy(busy);
 }

@@ -121,6 +121,8 @@ def make_server(service, host='127.0.0.1', port=8090, password=None, allowed_hos
                 path = urlsplit(self.path).path
                 if path == '/api/settings':
                     self.reply(200, service.save_folder(data.get('download_dir')))
+                elif path == '/api/summary':
+                    self.reply(200, service.summary(data.get('id')))
                 elif path == '/api/cover-availability':
                     self.reply(200, service.cover_availability(data.get('ids')))
                 elif path == '/api/catalogs/refresh':

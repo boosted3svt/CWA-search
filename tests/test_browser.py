@@ -6,6 +6,62 @@ from test_web import website
 pytestmark = pytest.mark.skipif(os.environ.get('CWA_BROWSER_TEST') != '1', reason='Optional browser check')
 
 
+def test_browser_cached_summary_is_on_demand_and_mobile_safe(website, book, monkeypatch):
+    import json
+    from dataclasses import replace
+    from calibre.cache import CatalogStore, now
+    from config import Settings
+    playwright = pytest.importorskip('playwright.sync_api')
+    url, service, directory = website
+    config = json.loads(service.config.read_text())
+    config['catalog_cache_enabled'] = True
+    service.config.write_text(json.dumps(config))
+    settings = Settings.load(service.config)
+    library = settings.libraries()[0][1]
+    CatalogStore(settings.catalog_cache_dir).publish(library, [replace(book, source=library.url)], now())
+    calls = []
+    def lookup(selected):
+        calls.append(selected)
+        if len(calls) == 2:
+            return {'status':'unavailable','message':'A book information source is unavailable; try again later.'}
+        return {'status':'found','description':'A story. <img src=x onerror="window.badSummary=true">',
+                'source':'Open Library','source_url':'https://openlibrary.org/works/OL123W',
+                'matched_title':selected.title,'matched_authors':selected.authors}
+    monkeypatch.setattr('web.service.lookup_summary', lookup)
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(executable_path='/usr/bin/chromium', headless=True, args=['--no-sandbox'])
+        page = browser.new_page(viewport={'width':320,'height':720})
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.goto(url)
+        page.get_by_label('Author', exact=True).fill('Emily Rath')
+        page.get_by_label('Search all libraries', exact=True).check()
+        page.get_by_role('button', name='Search libraries', exact=True).click()
+        page.get_by_role('heading', name='1 matching book', exact=True).wait_for()
+        assert calls == []
+        history = (directory/'state/history.json').read_bytes()
+        page.get_by_role('button', name='Summary', exact=True).click()
+        page.get_by_role('link', name='Read more at Open Library', exact=True).wait_for()
+        assert len(calls) == 1
+        assert page.locator('#summary-text').inner_text().startswith('A story.')
+        assert page.locator('#summary-text img').count() == 0
+        assert page.evaluate('window.badSummary') is None
+        assert page.locator('#summary-source').get_attribute('href') == 'https://openlibrary.org/works/OL123W'
+        assert page.locator('#summary-dialog').bounding_box()['width'] <= 320
+        assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+        page.get_by_role('button', name='Close', exact=True).click()
+        assert page.locator('#summary-dialog').is_hidden()
+        page.get_by_role('button', name='Summary', exact=True).click()
+        page.get_by_text('A book information source is unavailable; try again later.', exact=True).wait_for()
+        assert len(calls) == 2 and page.locator('#summary-source').is_hidden()
+        assert page.locator('#summary-text').inner_text() == ''
+        page.keyboard.press('Escape')
+        assert page.locator('#summary-dialog').is_hidden()
+        assert (directory/'state/history.json').read_bytes() == history
+        assert not errors
+        browser.close()
+
+
 def test_browser_search_preview_select_and_save(website):
     playwright = pytest.importorskip('playwright.sync_api')
     url, _, directory = website
